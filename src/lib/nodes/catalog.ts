@@ -514,10 +514,13 @@ export const NODE_CATALOG: NodeDef[] = [
     category: 'AI',
     label: 'Completion',
     description:
-      'Send a prompt to an external model and emit its reply as text. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `provider` selects the wire: `openai` is OpenAI-compatible, so a `Base URL` also covers Groq, OpenRouter and local Ollama / LM Studio endpoints; `anthropic` speaks the Messages API. `Model` left blank falls back to the provider default. The API key comes from the toolbar\'s AI Keys dialog — it is never stored in the blueprint. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
+      'Send a prompt — optionally combined with data — to an external model and emit its reply as text. The `Data` port accepts any value: if the prompt contains `{{data}}` every occurrence is replaced with it, otherwise the data is appended after a blank line. An array of data means one call per element (scalar×array broadcasts, equal-length arrays zip pairwise, different lengths error); wrap an array in `json.stringify` upstream to send it as a single payload. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `provider` selects the wire: `openai` is OpenAI-compatible, so a `Base URL` also covers Groq, OpenRouter and local Ollama / LM Studio endpoints; `anthropic` speaks the Messages API. `Model` left blank falls back to the provider default. The API key comes from the toolbar\'s AI Keys dialog — it is never stored in the blueprint. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
     inputs: [
       { id: 'then_in', name: 'Then', type: T.exec },
       { id: 'prompt', name: 'Prompt', type: T['string-or-array'] },
+      // Payload from upstream. `any` so it accepts strings, numbers,
+      // arrays and objects (an object is serialized as JSON text).
+      { id: 'data', name: 'Data', type: T.any },
     ],
     outputs: [
       { id: 'then_out', name: 'Then', type: T.exec },
