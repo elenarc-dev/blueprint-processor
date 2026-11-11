@@ -283,7 +283,14 @@
         flow.edges,
         values,
       );
-      runModal = { ...runModal, running: false, result };
+      // A failed run is not a rejection: keep the result (and its
+      // logs) on screen and show the error above them.
+      runModal = {
+        ...runModal,
+        running: false,
+        result,
+        error: result.ok ? null : (result.error ?? 'Run failed'),
+      };
     } catch (err) {
       runModal = { ...runModal, running: false, error: String(err) };
     }
@@ -425,6 +432,18 @@
           {:else if runModal.error}
             <h4>Error</h4>
             <pre class="error">{runModal.error}</pre>
+            {#if runModal.result}
+              <h4>Logs</h4>
+              {#if runModal.result.logs.length === 0}
+                <span class="muted">(no log entries)</span>
+              {:else}
+                <ul class="logs">
+                  {#each runModal.result.logs as log, i (i)}
+                    <li><span class="log-label">{log.label}</span>: <code>{renderValue(log.value)}</code></li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
           {:else if runModal.result}
             {@const r = runModal.result}
             <h4>Output</h4>

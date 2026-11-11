@@ -40,6 +40,11 @@
      */
     onPathChange: (next: string | null) => void;
     onAfterIo: (msg: string, kind: 'info' | 'error') => void;
+    /** Whether the right-hand run-log drawer is open. */
+    logsOpen: boolean;
+    /** Entry count of the last run, shown next to the Logs button. */
+    logCount: number;
+    onToggleLogs: () => void;
   }
   let {
     meta,
@@ -49,6 +54,9 @@
     onMetaChange,
     onPathChange,
     onAfterIo,
+    logsOpen,
+    logCount,
+    onToggleLogs,
   }: Props = $props();
 
   let saving = $state(false);
@@ -224,6 +232,13 @@
     title="Configure AI provider API keys"
   >
     AI Keys
+  </button>
+  <button
+    class="btn"
+    onclick={onToggleLogs}
+    title="Show every log entry of the last run"
+  >
+    Logs{logCount > 0 ? ` · ${logCount}` : ''}
   </button>
 
   <div class="separator"></div>

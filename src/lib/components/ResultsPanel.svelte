@@ -13,8 +13,10 @@
     running: boolean;
     onRun: () => void;
     onClear: () => void;
+    /** Opens the full log drawer on the right. */
+    onOpenLogs: () => void;
   }
-  let { result, running, onRun, onClear }: Props = $props();
+  let { result, running, onRun, onClear, onOpenLogs }: Props = $props();
 
   let open = $state(true);
 </script>
@@ -27,8 +29,8 @@
     <span class="title">Run</span>
 
     {#if result}
-      <span class="badge ok">
-        {result.stats.nodes_executed} nodes · {result.stats.duration_ms} ms
+      <span class="badge" class:ok={result.ok} class:err={!result.ok}>
+        {result.ok ? 'ok' : 'failed'} · {result.stats.nodes_executed} nodes · {result.stats.duration_ms} ms
       </span>
     {/if}
 
@@ -66,14 +68,11 @@
             {#if result.logs.length === 0}
               <p class="muted">No <code>io.logger</code> nodes reached.</p>
             {:else}
-              <ol class="logs">
-                {#each result.logs as log, i (i)}
-                  <li>
-                    <span class="log-label">{log.label}</span>
-                    <span class="log-val">{renderValue(log.value)}</span>
-                  </li>
-                {/each}
-              </ol>
+              <p class="muted">
+                {result.logs.filter((l) => l.level === 'warn').length} warnings ·
+                {result.logs.filter((l) => l.level === 'error').length} errors
+              </p>
+              <button class="btn" onclick={onOpenLogs}>Open log panel →</button>
             {/if}
           </div>
         </div>
@@ -130,6 +129,10 @@
   }
   .badge.ok {
     background: #16a34a;
+    color: white;
+  }
+  .badge.err {
+    background: #dc2626;
     color: white;
   }
 
@@ -218,23 +221,4 @@
     word-break: break-all;
   }
 
-  .logs {
-    list-style: decimal;
-    padding-left: 22px;
-    margin: 0;
-  }
-  .logs li {
-    padding: 2px 0;
-    font-size: 12px;
-  }
-  .log-label {
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 600;
-    color: #0f172a;
-    margin-right: 6px;
-  }
-  .log-val {
-    font-family: 'JetBrains Mono', monospace;
-    color: #1e3a8a;
-  }
 </style>

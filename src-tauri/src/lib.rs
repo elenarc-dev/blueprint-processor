@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use ai::{AiGateway, RigGateway, SecretStatus, SecretStore};
 use blueprint::{Blueprint, SCHEMA_VERSION};
-use executor::{run_graph_with, ExecError, RunResult};
+use executor::{run_graph_with, ExecError, RunOutcome};
 use inventory::InventoryEntry;
 use serde::Serialize;
 use serde_json::Value;
@@ -140,13 +140,15 @@ async fn run_blueprint(
     app: tauri::AppHandle,
     json: String,
     inputs: HashMap<String, Value>,
-) -> Result<RunResult, ExecError> {
+) -> Result<RunOutcome, ExecError> {
     let bp: Blueprint = serde_json::from_str(&json).map_err(|e| ExecError::Node {
         node: "_root".into(),
         message: format!("invalid blueprint JSON: {e}"),
     })?;
     let gateway: Arc<dyn AiGateway> = Arc::new(RigGateway::new(secret_store(&app)?));
-    run_graph_with(&bp, &inputs, gateway).await
+    Ok(RunOutcome::from_run_result(
+        run_graph_with(&bp, &inputs, gateway).await,
+    ))
 }
 
 // ---------------------------------------------------------------------

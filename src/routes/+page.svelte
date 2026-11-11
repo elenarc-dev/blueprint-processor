@@ -36,6 +36,7 @@
   } from '$lib/components/InputsDialog.svelte';
   import type { RunResult } from '$lib/utils/runner-io';
   import { runBlueprint as runInRust } from '$lib/utils/runner-io';
+  import LogsPanel from '$lib/components/LogsPanel.svelte';
   import { blueprintToFlow } from '$lib/utils/blueprint-io';
   import { blueprintInputs } from '$lib/utils/blueprint-context.svelte';
   import {
@@ -263,6 +264,10 @@
   // submit/cancel.
   let inputDialogOpen = $state(false);
 
+  // Right-hand drawer with every log entry of the last run. Opens by
+  // itself when a run fails, which is exactly when the logs matter.
+  let logsOpen = $state(false);
+
   async function handleRun() {
     if (running) return;
     // Gate: if the graph declares any Blueprint Input, open the
@@ -281,6 +286,13 @@
     try {
       const result = await runInRust(bpMeta, flowNodes, flowEdges, inputs);
       runResult = result;
+
+      if (!result.ok) {
+        runError = result.error ?? 'Run failed';
+        logsOpen = true;
+        status = { message: `Run failed: ${runError}`, kind: 'error' };
+        return;
+      }
       const last =
         result.logs.length > 0
           ? result.logs[result.logs.length - 1].label
@@ -321,6 +333,9 @@
     onMetaChange={commitMeta}
     onPathChange={commitPath}
     onAfterIo={onAfterIoWithInventory}
+    {logsOpen}
+    logCount={runResult?.logs.length ?? 0}
+    onToggleLogs={() => (logsOpen = !logsOpen)}
   />
 
   <div class="main">
@@ -345,6 +360,11 @@
       onMetaChange={commitMeta}
       onNodeSave={handleNodeSave}
     />
+    <LogsPanel
+      result={runResult}
+      open={logsOpen}
+      onClose={() => (logsOpen = false)}
+    />
   </div>
 
   <ResultsPanel
@@ -352,6 +372,7 @@
     {running}
     onRun={handleRun}
     onClear={handleClearRun}
+    onOpenLogs={() => (logsOpen = true)}
   />
 
   {#if inputDialogOpen}

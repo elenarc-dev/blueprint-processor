@@ -41,10 +41,90 @@ pub struct EvalCtx<'a> {
     pub logs: &'a mut Vec<LogEntry>,
 }
 
-/// A log entry written by an `io.logger` node.
+impl EvalCtx<'_> {
+    /// Append one entry to the current run's log list.
+    ///
+    /// This is the one-liner every node uses to make itself debuggable
+    /// from the UI's log panel — `ctx.info("rows", json!(n))`. The entry
+    /// records who emitted it (`node_id` + `kind`) so the panel can show
+    /// provenance without the executor having to repeat it.
+    pub fn log(&mut self, level: LogLevel, label: impl Into<String>, value: impl Into<Value>) {
+        self.logs.push(LogEntry {
+            level,
+            node_id: self.node_id.to_string(),
+            kind: self.kind.to_string(),
+            label: label.into(),
+            value: value.into(),
+        });
+    }
+
+    /// Verbose, filtered out of the panel unless the user asks for it.
+    pub fn debug(&mut self, label: impl Into<String>, value: impl Into<Value>) {
+        self.log(LogLevel::Debug, label, value);
+    }
+
+    /// Normal progress entry (what `io.logger` emits by default).
+    pub fn info(&mut self, label: impl Into<String>, value: impl Into<Value>) {
+        self.log(LogLevel::Info, label, value);
+    }
+
+    /// Something unexpected that did not abort the node.
+    pub fn warn(&mut self, label: impl Into<String>, value: impl Into<Value>) {
+        self.log(LogLevel::Warn, label, value);
+    }
+
+    /// A recoverable failure the user should see first.
+    pub fn error(&mut self, label: impl Into<String>, value: impl Into<Value>) {
+        self.log(LogLevel::Error, label, value);
+    }
+}
+
+/// Severity of a [`LogEntry`]. Serialised lowercase so the frontend can
+/// style/filter on the raw string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    /// Lenient parse for blueprint params (`io.logger`'s `level`).
+    /// Unknown/absent values fall back to `Info` so an older blueprint
+    /// that predates the param keeps logging.
+    pub fn from_name(name: &str) -> LogLevel {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "debug" => LogLevel::Debug,
+            "warn" | "warning" => LogLevel::Warn,
+            "error" => LogLevel::Error,
+            _ => LogLevel::Info,
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        };
+        f.write_str(s)
+    }
+}
+
+/// A log entry written by `io.logger` or by any node through
+/// [`EvalCtx::log`].
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
+    pub level: LogLevel,
+    /// Node that emitted the entry; empty for run-level entries.
     pub node_id: String,
+    /// `kind` of the emitting node (`"run"` for run-level entries).
+    pub kind: String,
     pub label: String,
     pub value: Value,
 }
@@ -118,6 +198,82 @@ pub struct RunResult {
 pub struct RunStats {
     pub nodes_executed: usize,
     pub duration_ms: u64,
+}
+
+/// A run that stopped early: the executor error **plus** the log entries
+/// collected up to that point. Without this, every failing run threw
+/// away exactly the information needed to explain the failure.
+#[derive(Debug)]
+pub struct RunFailure {
+    pub error: ExecError,
+    pub logs: Vec<LogEntry>,
+    pub stats: RunStats,
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl From<ExecError> for RunFailure {
+    fn from(error: ExecError) -> Self {
+        RunFailure {
+            error,
+            logs: Vec::new(),
+            stats: RunStats {
+                nodes_executed: 0,
+                duration_ms: 0,
+            },
+        }
+    }
+}
+
+/// What the `run_blueprint` command hands back to the UI. A failed run is
+/// **not** an IPC error: it resolves normally with `ok: false`, so the
+/// log panel can render the entries that led to the failure.
+#[derive(Debug, Serialize)]
+pub struct RunOutcome {
+    pub ok: bool,
+    pub outputs: HashMap<String, Value>,
+    pub logs: Vec<LogEntry>,
+    pub stats: RunStats,
+    /// `None` on success, the executor message otherwise.
+    pub error: Option<String>,
+}
+
+impl RunOutcome {
+    pub fn from_run_result(result: Result<RunResult, RunFailure>) -> Self {
+        match result {
+            Ok(r) => RunOutcome {
+                ok: true,
+                outputs: r.outputs,
+                logs: r.logs,
+                stats: r.stats,
+                error: None,
+            },
+            Err(f) => {
+                let message = f.error.to_string();
+                let mut logs = f.logs;
+                // Mirror the failure into the log stream so a copied
+                // log dump is self-contained.
+                logs.push(LogEntry {
+                    level: LogLevel::Error,
+                    node_id: String::new(),
+                    kind: "run".into(),
+                    label: "run failed".into(),
+                    value: Value::String(message.clone()),
+                });
+                RunOutcome {
+                    ok: false,
+                    outputs: HashMap::new(),
+                    logs,
+                    stats: f.stats,
+                    error: Some(message),
+                }
+            }
+        }
+    }
 }
 
 /// Stable reference to a shared `Value::Null` used as a default for

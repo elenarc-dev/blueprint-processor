@@ -412,10 +412,19 @@ export const NODE_CATALOG: NodeDef[] = [
     kind: 'io.logger',
     category: 'IO',
     label: 'Logger',
-    description: 'Print any value with a label (no return).',
+    description: 'Record any value in the run log with a label and a severity (no return). Every entry lands in the log panel, including the ones written before a run fails; `debug` entries stay hidden until you filter for them.',
     inputs: [{ id: 'then_in', name: 'Then', type: T.exec }, { id: 'in', name: 'In', type: T.any }],
     outputs: [{ id: 'out', name: 'Pass', type: T.any }],
-    params: [{ kind: 'string', key: 'label', label: 'Label', default: 'log', placeholder: 'label' }],
+    params: [
+      { kind: 'string', key: 'label', label: 'Label', default: 'log', placeholder: 'label' },
+      {
+        kind: 'select',
+        key: 'level',
+        label: 'Level',
+        default: 'info',
+        options: ['debug', 'info', 'warn', 'error'],
+      },
+    ],
   },
   {
     kind: 'file.read',

@@ -12,8 +12,15 @@ import type { BlueprintMeta } from '$lib/types/blueprint';
 /** A value produced by `io.output`. */
 export type RunOutput = unknown;
 
+/** Severity of a log entry, mirroring `executor::LogLevel` in Rust. */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 export interface RunLog {
+  level: LogLevel;
+  /** Node that emitted the entry; `''` for run-level entries. */
   node_id: string;
+  /** `kind` of the emitting node (`'run'` for run-level entries). */
+  kind: string;
   label: string;
   value: unknown;
 }
@@ -21,10 +28,18 @@ export interface RunStats {
   nodes_executed: number;
   duration_ms: number;
 }
+
+/**
+ * Result of the last run. A failed run is **not** an exception: it comes
+ * back with `ok: false`, `error` set and the logs collected before the
+ * failure, so the log panel can explain what went wrong.
+ */
 export interface RunResult {
+  ok: boolean;
   outputs: Record<string, RunOutput>;
   logs: RunLog[];
   stats: RunStats;
+  error: string | null;
 }
 
 /** Shape the JSON we pass to Rust: a complete Blueprint JSON document. */
@@ -42,6 +57,9 @@ function buildPayload(
  * Run the current graph in the Rust executor. The graph itself is sent as
  * a json string (the same shape we serialise when saving); `inputs` is
  * the object mapping an `io.input` `params.name` → runtime value.
+ *
+ * Resolves for both outcomes of a run — inspect `ok`/`error`. Only a
+ * transport-level failure (unknown command, unparseable blueprint) throws.
  */
 export async function runBlueprint(
   meta: BlueprintMeta,
@@ -51,8 +69,7 @@ export async function runBlueprint(
 ): Promise<RunResult> {
   const { json } = buildPayload(meta, nodes, edges, inputs);
   try {
-    const result = await invoke<RunResult>('run_blueprint', { json, inputs });
-    return result;
+    return await invoke<RunResult>('run_blueprint', { json, inputs });
   } catch (err) {
     // Rust ExecError serialises to its Display string; surface as an
     // exception-like object so the UI can render it.

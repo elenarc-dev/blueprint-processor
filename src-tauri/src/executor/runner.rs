@@ -16,7 +16,7 @@ use crate::blueprint::{Blueprint, BlueprintConnection, BlueprintNode};
 
 use super::nodes;
 use super::{
-    EvalCtx, ExecError, LogEntry, NodeExec, NodeInputs, RunResult, RunStats,
+    EvalCtx, ExecError, LogEntry, NodeExec, NodeInputs, RunFailure, RunResult, RunStats,
 };
 
 /// Run a blueprint graph and return the result.
@@ -35,7 +35,7 @@ use super::{
 pub async fn run_graph(
     bp: &Blueprint,
     external_inputs: &HashMap<String, Value>,
-) -> Result<RunResult, ExecError> {
+) -> Result<RunResult, RunFailure> {
     run_graph_with(bp, external_inputs, Arc::new(UnconfiguredGateway)).await
 }
 
@@ -50,12 +50,12 @@ pub async fn run_graph_with(
     bp: &Blueprint,
     external_inputs: &HashMap<String, Value>,
     gateway: Arc<dyn AiGateway>,
-) -> Result<RunResult, ExecError> {
+) -> Result<RunResult, RunFailure> {
     let started = std::time::Instant::now();
     let registry = nodes::setup_registry();
     let async_registry = nodes::setup_async_registry();
     let incoming = build_incoming(&bp.connections);
-    let order = topo_sort(&bp.nodes, &bp.connections)?;
+    let order = topo_sort(&bp.nodes, &bp.connections).map_err(RunFailure::from)?;
     let mut effective = external_inputs.clone();
     apply_metadata_defaults(&mut effective, &bp.metadata.inputs);
     execute(
@@ -270,7 +270,7 @@ async fn execute(
     external_inputs: &HashMap<String, Value>,
     gateway: &Arc<dyn AiGateway>,
     started: std::time::Instant,
-) -> Result<RunResult, ExecError> {
+) -> Result<RunResult, RunFailure> {
     let mut outputs_produced: HashMap<(String, String), Value> = HashMap::new();
     let mut final_outputs: HashMap<String, Value> = HashMap::new();
     let mut logs: Vec<LogEntry> = Vec::new();
@@ -279,13 +279,20 @@ async fn execute(
     let null_value = Value::Null;
 
     for node_id in order {
-        let bp_node = bp_nodes
-            .iter()
-            .find(|n| &n.id == node_id)
-            .ok_or_else(|| ExecError::Node {
-                node: node_id.clone(),
-                message: "missing from blueprint during execution".into(),
-            })?;
+        let bp_node = match bp_nodes.iter().find(|n| &n.id == node_id) {
+            Some(n) => n,
+            None => {
+                return Err(fail(
+                    ExecError::Node {
+                        node: node_id.clone(),
+                        message: "missing from blueprint during execution".into(),
+                    },
+                    logs,
+                    executed,
+                    started,
+                ))
+            }
+        };
 
         // Dispatch: a kind lives in exactly one of the two tables. Async
         // is checked first because async executors need owned inputs,
@@ -293,7 +300,12 @@ async fn execute(
         let sync_executor = registry.get(&bp_node.kind).copied();
         let async_executor = async_registry.get(&bp_node.kind).copied();
         if sync_executor.is_none() && async_executor.is_none() {
-            return Err(ExecError::UnknownKind(bp_node.kind.clone()));
+            return Err(fail(
+                ExecError::UnknownKind(bp_node.kind.clone()),
+                logs,
+                executed,
+                started,
+            ));
         }
 
         // Coerce the frontend-typed inline defaults (`params[<port_id>]`
@@ -355,7 +367,10 @@ async fn execute(
                 node_id: node_id.clone(),
                 gateway: Arc::clone(gateway),
             };
-            let outs = run_async(&owned_inputs, &params, &env).await?;
+            let outs = match run_async(&owned_inputs, &params, &env).await {
+                Ok(outs) => outs,
+                Err(e) => return Err(fail(e, logs, executed, started)),
+            };
             executed += 1;
             for (port_id, val) in outs {
                 outputs_produced.insert((node_id.clone(), port_id), val);
@@ -365,15 +380,22 @@ async fn execute(
 
         let executor = sync_executor
             .expect("validated above: the kind is in the sync or the async registry");
-        let mut ctx = EvalCtx {
-            node_id,
-            kind: &bp_node.kind,
-            external_inputs,
-            outputs: &mut final_outputs,
-            logs: &mut logs,
+        // Scope the ctx so its `&mut logs` borrow ends before the error
+        // path moves `logs` into the failure.
+        let res = {
+            let mut ctx = EvalCtx {
+                node_id,
+                kind: &bp_node.kind,
+                external_inputs,
+                outputs: &mut final_outputs,
+                logs: &mut logs,
+            };
+            executor(&inputs, &params, &mut ctx)
         };
-
-        let outs = executor(&inputs, &params, &mut ctx)?;
+        let outs = match res {
+            Ok(outs) => outs,
+            Err(e) => return Err(fail(e, logs, executed, started)),
+        };
         executed += 1;
         for (port_id, val) in outs {
             outputs_produced.insert((node_id.clone(), port_id), val);
@@ -388,6 +410,24 @@ async fn execute(
             duration_ms: started.elapsed().as_millis() as u64,
         },
     })
+}
+
+/// Wrap a node error with the logs collected so far. Called on every
+/// `return` that aborts a run, so no diagnostic work is ever discarded.
+fn fail(
+    error: ExecError,
+    logs: Vec<LogEntry>,
+    executed: usize,
+    started: std::time::Instant,
+) -> RunFailure {
+    RunFailure {
+        error,
+        logs,
+        stats: RunStats {
+            nodes_executed: executed,
+            duration_ms: started.elapsed().as_millis() as u64,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -423,7 +463,7 @@ mod tests {
     fn run_sync(
         bp: &Blueprint,
         ext: &HashMap<String, Value>,
-    ) -> Result<RunResult, ExecError> {
+    ) -> Result<RunResult, RunFailure> {
         tauri::async_runtime::block_on(run_graph(bp, ext))
     }
 
@@ -1436,6 +1476,6 @@ mod tests {
         );
         let ext = HashMap::new();
         let err = run_sync(&bp, &ext).unwrap_err();
-        assert!(matches!(err, ExecError::Cycle(_)));
+        assert!(matches!(err.error, ExecError::Cycle(_)));
     }
 }
