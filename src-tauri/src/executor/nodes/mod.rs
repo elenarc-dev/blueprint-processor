@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 
-use crate::executor::NodeExec;
+use crate::executor::{AsyncNodeExec, NodeExec};
 
+pub mod ai_completion;
 pub mod array_create;
 pub mod array_filter;
 pub mod array_get_field;
@@ -106,6 +107,21 @@ pub fn setup_registry() -> HashMap<String, NodeExec> {
     r.insert("json.parse".into(), json_parse::exec as NodeExec);
     r.insert("json.stringify".into(), json_stringify::exec as NodeExec);
     r.insert("json.readFile".into(), json_read_file::exec as NodeExec);
+
+    r
+}
+
+/// Async sibling of [`setup_registry`].
+///
+/// Only kinds that must await external I/O live here. Keeping them out of
+/// the sync table preserves the "cheap fn-pointer registry" decision for
+/// the pure in-memory nodes and keeps `run_graph`'s sync path unchanged.
+/// A kind must be in exactly one of the two tables.
+pub fn setup_async_registry() -> HashMap<String, AsyncNodeExec> {
+    let mut r: HashMap<String, AsyncNodeExec> = HashMap::new();
+
+    // AI
+    r.insert("ai.completion".into(), ai_completion::exec as AsyncNodeExec);
 
     r
 }

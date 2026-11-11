@@ -15,6 +15,8 @@
 //!   * The dispatch table is built by `nodes::setup_registry()`.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -28,7 +30,7 @@ pub mod runner;
 // internal sub-module layout. Kept thin so `executor::runner::*` remains
 // the canonical home for the orchestration primitives (helpers like
 // `build_incoming`, `topo_sort`, the integration tests).
-pub use runner::run_graph;
+pub use runner::run_graph_with;
 
 /// Per-call evaluation context. One per node execution.
 pub struct EvalCtx<'a> {
@@ -59,6 +61,24 @@ pub type NodeExec = fn(
     params: &Map<String, Value>,
     ctx: &mut EvalCtx<'_>,
 ) -> Result<NodeOutputs, ExecError>;
+
+/// Async sibling of [`NodeExec`], used only by kinds that must await I/O
+/// (today just `ai.*`).
+///
+/// **Why a second table instead of making `NodeExec` async:** a fn pointer
+/// cannot return `impl Future`, and boxing every executor into
+/// `Box<dyn Future>` would pay an allocation per node on the hot path for
+/// 37 nodes that are pure in-memory work. The runner checks the async
+/// table first, awaits it when present, and otherwise takes the existing
+/// sync path untouched.
+///
+/// Async executors receive **owned** inputs: the runner clones them so the
+/// boxed future never borrows the per-iteration locals it cannot outlive.
+pub type AsyncNodeExec = for<'a> fn(
+    inputs: &'a Map<String, Value>,
+    params: &'a Map<String, Value>,
+    env: &'a crate::ai::AiEnv,
+) -> Pin<Box<dyn Future<Output = Result<NodeOutputs, ExecError>> + Send + 'a>>;
 
 #[derive(Debug, Error)]
 pub enum ExecError {

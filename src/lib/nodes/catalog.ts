@@ -14,7 +14,8 @@ export type NodeCategory =
   | 'Array'
   | 'IO'
   | 'Json'
-  | 'Image';
+  | 'Image'
+  | 'AI';
 
 export const CATEGORY_COLORS: Record<NodeCategory, string> = {
   Literal: '#a855f7', // violet
@@ -24,13 +25,19 @@ export const CATEGORY_COLORS: Record<NodeCategory, string> = {
   IO: '#f59e0b',      // amber
   Json: '#eab308',    // yellow
   Image: '#8b5cf6',   // violet — binary pipeline's home category
+  // Red is unused by every other category, so an `ai.*` node is
+  // identifiable at a glance on a busy canvas.
+  AI: '#dc2626',      // red
 };
 
 export type ParamField =
   | { kind: 'number'; key: string; label: string; default: number; min?: number; max?: number; step?: number }
   | { kind: 'string'; key: string; label: string; default: string; placeholder?: string }
-  | { kind: 'boolean'; key: string; label: string; default: boolean }
-  | { kind: 'select'; key: string; label: string; default: string; options: string[] };
+  | { kind: 'boolean'; key: string; label: string; default: boolean }  | { kind: 'select';  key: string; label: string; default: string;  options: string[] }
+  /** Multi-line text (prompts, system instructions). Rendered as a
+   *  `<textarea>` in the Inspector; the node body never shows it inline
+   *  because long prompts don't fit on a card. */
+  | { kind: 'textarea'; key: string; label: string; default: string; placeholder?: string; rows?: number };
 
 /**
  * Optional declaration of N synthesised input ports whose count is
@@ -496,6 +503,38 @@ export const NODE_CATALOG: NodeDef[] = [
     ],
   },
 
+  // ---------- AI ----------
+  // The API key is NOT a node param and never lands in the blueprint:
+  // `Run` reads it from the app's secret store (toolbar → AI Keys).
+  // Shape mirrors the rest of the catalog — scalar prompt in → scalar
+  // answer out, array prompt in → parallel array out (one provider call
+  // per element, `concurrency` in flight).
+  {
+    kind: 'ai.completion',
+    category: 'AI',
+    label: 'Completion',
+    description:
+      'Send a prompt to an external model and emit its reply as text. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `provider` selects the wire: `openai` is OpenAI-compatible, so a `Base URL` also covers Groq, OpenRouter and local Ollama / LM Studio endpoints; `anthropic` speaks the Messages API. `Model` left blank falls back to the provider default. The API key comes from the toolbar\'s AI Keys dialog — it is never stored in the blueprint. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
+    inputs: [
+      { id: 'then_in', name: 'Then', type: T.exec },
+      { id: 'prompt', name: 'Prompt', type: T['string-or-array'] },
+    ],
+    outputs: [
+      { id: 'then_out', name: 'Then', type: T.exec },
+      { id: 'out', name: 'Out', type: T['string-or-array'] },
+    ],
+    params: [
+      { kind: 'select', key: 'provider', label: 'Provider', default: 'openai', options: ['openai', 'anthropic'] },
+      { kind: 'string', key: 'model', label: 'Model', default: '', placeholder: 'gpt-4o-mini' },
+      { kind: 'string', key: 'base_url', label: 'Base URL (OpenAI-compatible)', default: '', placeholder: 'https://api.openai.com/v1' },
+      { kind: 'textarea', key: 'prompt', label: 'Prompt (default)', default: '', placeholder: 'Summarize this row as one sentence…', rows: 4 },
+      { kind: 'textarea', key: 'system', label: 'System', default: '', placeholder: 'You are a concise data assistant.', rows: 2 },
+      { kind: 'number', key: 'temperature', label: 'Temperature', default: 0.2, min: 0, max: 2, step: 0.1 },
+      { kind: 'number', key: 'max_tokens', label: 'Max tokens', default: 512, min: 1, max: 32768, step: 1 },
+      { kind: 'number', key: 'concurrency', label: 'Concurrency (arrays)', default: 4, min: 1, max: 16, step: 1 },
+    ],
+  },
+
   // ---------- Image / Binary pipeline ----------
   // The `binary` port type carries base64-encoded raw bytes; valid
   // pairings (single vs array) are handled per executor — see the
@@ -532,7 +571,7 @@ export const NODE_CATALOG: NodeDef[] = [
 ];
 
 export const CATEGORIES: NodeCategory[] = [
-  'Literal', 'Math', 'String', 'Json', 'Array', 'IO', 'Image',
+  'Literal', 'Math', 'String', 'Json', 'Array', 'IO', 'Image', 'AI',
 ];
 
 export function getDef(kind: string): NodeDef | undefined {

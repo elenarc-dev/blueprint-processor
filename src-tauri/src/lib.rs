@@ -6,6 +6,7 @@
 //   * Run nodes (executor) and return the results.
 //   * Track an inventory of saved blueprints for the Dashboard.
 
+mod ai;
 mod blueprint;
 mod executor;
 mod inventory;
@@ -13,9 +14,11 @@ mod inventory;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
+use ai::{AiGateway, RigGateway, SecretStatus, SecretStore};
 use blueprint::{Blueprint, SCHEMA_VERSION};
-use executor::{run_graph, ExecError, RunResult};
+use executor::{run_graph_with, ExecError, RunResult};
 use inventory::InventoryEntry;
 use serde::Serialize;
 use serde_json::Value;
@@ -124,8 +127,17 @@ fn load_blueprint(path: String) -> Result<String, BlueprintError> {
 /// key. Required inputs without a `default` and no provided runtime
 /// value collapse downstream to `Value::Null`. The fully-qualified
 /// Blueprint JSON is the same shape we accept on save.
+///
+/// **Async on purpose:** `ai.*` nodes await provider calls (AI-BACK-004),
+/// and the graph order is still fully deterministic — the topological
+/// order is computed up front and nodes are awaited one at a time, so a
+/// slow completion delays later nodes instead of racing them.
+///
+/// AI credentials are resolved here, from the app's secret store, and
+/// handed to the runner as a gateway. They never travel in the JSON.
 #[tauri::command]
-fn run_blueprint(
+async fn run_blueprint(
+    app: tauri::AppHandle,
     json: String,
     inputs: HashMap<String, Value>,
 ) -> Result<RunResult, ExecError> {
@@ -133,7 +145,40 @@ fn run_blueprint(
         node: "_root".into(),
         message: format!("invalid blueprint JSON: {e}"),
     })?;
-    run_graph(&bp, &inputs)
+    let gateway: Arc<dyn AiGateway> = Arc::new(RigGateway::new(secret_store(&app)?));
+    run_graph_with(&bp, &inputs, gateway).await
+}
+
+// ---------------------------------------------------------------------
+// AI credential commands — back the toolbar's "AI Keys" dialog.
+//
+// None of these return a key. `ai_key_status` answers `configured` plus a
+// last-4 hint, which is all the UI needs (AI-SEC-002).
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+fn ai_key_status(app: tauri::AppHandle) -> Result<Vec<SecretStatus>, String> {
+    secret_store(&app)
+        .map_err(|e| e.to_string())?
+        .status()
+}
+
+#[tauri::command]
+fn ai_set_key(
+    app: tauri::AppHandle,
+    provider: String,
+    key: String,
+) -> Result<Vec<SecretStatus>, String> {
+    let store = secret_store(&app).map_err(|e| e.to_string())?;
+    store.set(&provider, &key)?;
+    store.status()
+}
+
+#[tauri::command]
+fn ai_clear_key(app: tauri::AppHandle, provider: String) -> Result<Vec<SecretStatus>, String> {
+    let store = secret_store(&app).map_err(|e| e.to_string())?;
+    store.clear(&provider)?;
+    store.status()
 }
 
 // ---------------------------------------------------------------------
@@ -196,6 +241,17 @@ fn inventory_path(app: tauri::AppHandle) -> Result<String, String> {
 // Helpers
 // ---------------------------------------------------------------------
 
+/// The app-data-dir backed credential store. Resolved lazily per command
+/// so tests never need an `AppHandle` and the path always matches the
+/// platform's app data directory.
+fn secret_store(app: &tauri::AppHandle) -> Result<SecretStore, ExecError> {
+    let dir = app.path().app_data_dir().map_err(|e| ExecError::Node {
+        node: "_root".into(),
+        message: format!("resolve app_data_dir: {e}"),
+    })?;
+    Ok(SecretStore::new(dir))
+}
+
 /// Upsert (path, name) into the inventory, tolerating any failure
 /// (returns `None`). Used as a best-effort side-effect of `save_blueprint`.
 /// Logs the failure so devtools surfaces 'why doesn't my dashboard show
@@ -256,6 +312,9 @@ pub fn run() {
             save_blueprint,
             load_blueprint,
             run_blueprint,
+            ai_key_status,
+            ai_set_key,
+            ai_clear_key,
             inventory_list,
             inventory_add,
             inventory_remove,

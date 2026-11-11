@@ -253,6 +253,20 @@
                       },
                     })}
                 />
+              {:else if field.kind === 'textarea'}
+                <textarea
+                  rows={field.rows ?? 3}
+                  placeholder={field.placeholder ?? ''}
+                  style="width:100%;min-height:56px;font-family:inherit;font-size:12px;padding:4px 6px;border:1px solid #d4d4d8;border-radius:4px;resize:vertical;"
+                  value={(d.params[field.key] as string | undefined) ?? ''}
+                  oninput={(e) =>
+                    onNodeSave(selectedNode.id, {
+                      params: {
+                        ...d.params,
+                        [field.key]: e.currentTarget.value,
+                      },
+                    })}
+                ></textarea>
               {:else if field.kind === 'boolean'}
                 <label class="check">
                   <input

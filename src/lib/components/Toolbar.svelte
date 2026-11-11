@@ -14,6 +14,7 @@
   } from '@tauri-apps/plugin-dialog';
   import type { Blueprint } from '$lib/types/blueprint';
   import { makeMeta, type BlueprintMeta } from '$lib/types/blueprint';
+  import AiKeysDialog from './AiKeysDialog.svelte';
   import {
     blueprintToFlow,
     composeBlueprint,
@@ -52,6 +53,8 @@
 
   let saving = $state(false);
   let loading = $state(false);
+  /** AI provider keys live here, not in a node — see AiKeysDialog. */
+  let keysOpen = $state(false);
 
   async function handleSave() {
     try {
@@ -215,6 +218,16 @@
 
   <div class="separator"></div>
 
+  <button
+    class="btn"
+    onclick={() => (keysOpen = true)}
+    title="Configure AI provider API keys"
+  >
+    AI Keys
+  </button>
+
+  <div class="separator"></div>
+
   <label class="name-field">
     <span class="muted">Name</span>
     <input
@@ -230,6 +243,8 @@
 
   <div class="hint">Drag nodes from the left panel</div>
 </header>
+
+<AiKeysDialog bind:open={keysOpen} />
 
 <style>
   .toolbar {

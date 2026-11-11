@@ -7,9 +7,11 @@
 //! `io.logger` appends to the result's logs.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use crate::ai::{AiEnv, AiGateway, UnconfiguredGateway};
 use crate::blueprint::{Blueprint, BlueprintConnection, BlueprintNode};
 
 use super::nodes;
@@ -26,12 +28,32 @@ use super::{
 /// missing inputs collapse to the right fallback (declared default →
 /// `Value::Null` for any undeclared/missing combination). The original
 /// `external_inputs` map is not mutated; we clone and shadow.
-pub fn run_graph(
+/// Run a graph without an AI gateway: every `ai.*` node fails with
+/// `MissingKey`. Kept as the simple entry point for tests and for any
+/// future caller that only runs pure nodes.
+#[allow(dead_code)]
+pub async fn run_graph(
     bp: &Blueprint,
     external_inputs: &HashMap<String, Value>,
 ) -> Result<RunResult, ExecError> {
+    run_graph_with(bp, external_inputs, Arc::new(UnconfiguredGateway)).await
+}
+
+/// [`run_graph`] with an explicit AI gateway.
+///
+/// The Tauri command supplies the real, secret-store-backed gateway; tests
+/// inject `ai::mock::MockGateway` so `cargo test` never needs a key or a
+/// network connection. A caller that passes no gateway (`run_graph`) gets
+/// [`UnconfiguredGateway`], where any `ai.*` node fails loudly instead of
+/// silently returning placeholder text.
+pub async fn run_graph_with(
+    bp: &Blueprint,
+    external_inputs: &HashMap<String, Value>,
+    gateway: Arc<dyn AiGateway>,
+) -> Result<RunResult, ExecError> {
     let started = std::time::Instant::now();
     let registry = nodes::setup_registry();
+    let async_registry = nodes::setup_async_registry();
     let incoming = build_incoming(&bp.connections);
     let order = topo_sort(&bp.nodes, &bp.connections)?;
     let mut effective = external_inputs.clone();
@@ -41,9 +63,12 @@ pub fn run_graph(
         &bp.nodes,
         &incoming,
         &registry,
+        &async_registry,
         &effective,
+        &gateway,
         started,
     )
+    .await
 }
 
 /// For each declared `BlueprintInput` without a value in `effective`,
@@ -235,12 +260,15 @@ fn topo_sort(
     Ok(order)
 }
 
-fn execute(
+#[allow(clippy::too_many_arguments)]
+async fn execute(
     order: &[String],
     bp_nodes: &[BlueprintNode],
     incoming: &HashMap<String, HashMap<String, (String, String)>>,
     registry: &HashMap<String, NodeExec>,
+    async_registry: &HashMap<String, super::AsyncNodeExec>,
     external_inputs: &HashMap<String, Value>,
+    gateway: &Arc<dyn AiGateway>,
     started: std::time::Instant,
 ) -> Result<RunResult, ExecError> {
     let mut outputs_produced: HashMap<(String, String), Value> = HashMap::new();
@@ -259,9 +287,14 @@ fn execute(
                 message: "missing from blueprint during execution".into(),
             })?;
 
-        let executor = *registry.get(&bp_node.kind).ok_or_else(|| {
-            ExecError::UnknownKind(bp_node.kind.clone())
-        })?;
+        // Dispatch: a kind lives in exactly one of the two tables. Async
+        // is checked first because async executors need owned inputs,
+        // which are collected below.
+        let sync_executor = registry.get(&bp_node.kind).copied();
+        let async_executor = async_registry.get(&bp_node.kind).copied();
+        if sync_executor.is_none() && async_executor.is_none() {
+            return Err(ExecError::UnknownKind(bp_node.kind.clone()));
+        }
 
         // Coerce the frontend-typed inline defaults (`params[<port_id>]`
         // keys) into a HashMap for executor-side lookup. The frontend
@@ -307,6 +340,31 @@ fn execute(
             };
             inputs.insert(port_in.id.clone(), value);
         }
+
+        // Async branch (AI nodes). Inputs are cloned into owned values so
+        // the boxed future holds no borrow of `outputs_produced`, then the
+        // borrowed map is dropped before the await. Only `ai.*` kinds take
+        // this path, so the clone cost lands on AI payloads alone.
+        if let Some(run_async) = async_executor {
+            let owned_inputs: Map<String, Value> = inputs
+                .iter()
+                .map(|(k, v)| (k.clone(), (*v).clone()))
+                .collect();
+            drop(inputs);
+            let env = AiEnv {
+                node_id: node_id.clone(),
+                gateway: Arc::clone(gateway),
+            };
+            let outs = run_async(&owned_inputs, &params, &env).await?;
+            executed += 1;
+            for (port_id, val) in outs {
+                outputs_produced.insert((node_id.clone(), port_id), val);
+            }
+            continue;
+        }
+
+        let executor = sync_executor
+            .expect("validated above: the kind is in the sync or the async registry");
         let mut ctx = EvalCtx {
             node_id,
             kind: &bp_node.kind,
@@ -357,6 +415,161 @@ mod tests {
             connections,
             metadata: Default::default(),
         }
+    }
+
+    /// `run_graph` is async because AI nodes await provider calls; the
+    /// existing tests stay synchronous through Tauri's shared runtime
+    /// (no extra runtime dependency in the test harness).
+    fn run_sync(
+        bp: &Blueprint,
+        ext: &HashMap<String, Value>,
+    ) -> Result<RunResult, ExecError> {
+        tauri::async_runtime::block_on(run_graph(bp, ext))
+    }
+
+    #[test]
+    fn ai_node_output_feeds_downstream_split() {
+        // AI-TEST-006. The task's example was `[CSV] -> [AI] -> [String
+        // Split]`; there is no CSV node in the catalog, so the CSV row is
+        // produced by `literal.string` — same graph shape, real nodes.
+        // The model call goes through `MockGateway`, so the test is
+        // offline and deterministic.
+        use crate::ai::mock::MockGateway;
+        use crate::ai::AiGateway;
+
+        fn commas_to_semicolons(prompt: &str) -> String {
+            prompt.replace(',', ";")
+        }
+
+        let bp = make_blueprint(
+            vec![
+                BlueprintNode {
+                    id: "csv".into(),
+                    kind: "literal.string".into(),
+                    category: None,
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                    label: None,
+                    params: json!({"value": "1,2,3"}),
+                    inputs: vec![],
+                    outputs: vec![port("value", "Value", "string")],
+                },
+                BlueprintNode {
+                    id: "ai".into(),
+                    kind: "ai.completion".into(),
+                    category: None,
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                    label: None,
+                    // No provider key here on purpose: credentials come
+                    // from the gateway, never from the blueprint.
+                    params: json!({"provider": "openai", "model": "test-model"}),
+                    inputs: vec![
+                        port("then_in", "Then", "exec"),
+                        port("prompt", "Prompt", "string-or-array"),
+                    ],
+                    outputs: vec![
+                        port("then_out", "Then", "exec"),
+                        port("out", "Out", "string-or-array"),
+                    ],
+                },
+                BlueprintNode {
+                    id: "split".into(),
+                    kind: "string.split".into(),
+                    category: None,
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                    label: None,
+                    params: json!({"sep": ";"}),
+                    inputs: vec![
+                        port("then_in", "Then", "exec"),
+                        port("in", "In", "string"),
+                    ],
+                    outputs: vec![
+                        port("then_out", "Then", "exec"),
+                        port("out", "Out", "array"),
+                    ],
+                },
+                BlueprintNode {
+                    id: "count".into(),
+                    kind: "array.length".into(),
+                    category: None,
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                    label: None,
+                    params: json!({}),
+                    inputs: vec![
+                        port("then_in", "Then", "exec"),
+                        port("in", "In", "array"),
+                    ],
+                    outputs: vec![
+                        port("then_out", "Then", "exec"),
+                        port("out", "Length", "number"),
+                    ],
+                },
+                BlueprintNode {
+                    id: "out".into(),
+                    kind: "io.output".into(),
+                    category: None,
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                    label: None,
+                    params: json!({"name": "count"}),
+                    inputs: vec![
+                        port("then_in", "Then", "exec"),
+                        port("in", "In", "any"),
+                    ],
+                    outputs: vec![],
+                },
+            ],
+            vec![
+                BlueprintConnection {
+                    id: "e1".into(),
+                    source_node: "csv".into(),
+                    source_port: "value".into(),
+                    target_node: "ai".into(),
+                    target_port: "prompt".into(),
+                },
+                BlueprintConnection {
+                    id: "e2".into(),
+                    source_node: "ai".into(),
+                    source_port: "out".into(),
+                    target_node: "split".into(),
+                    target_port: "in".into(),
+                },
+                BlueprintConnection {
+                    id: "e3".into(),
+                    source_node: "split".into(),
+                    source_port: "out".into(),
+                    target_node: "count".into(),
+                    target_port: "in".into(),
+                },
+                BlueprintConnection {
+                    id: "e4".into(),
+                    source_node: "count".into(),
+                    source_port: "out".into(),
+                    target_node: "out".into(),
+                    target_port: "in".into(),
+                },
+            ],
+        );
+
+        let mock = Arc::new(MockGateway::new(commas_to_semicolons));
+        let gateway: Arc<dyn AiGateway> = mock.clone();
+        let res = tauri::async_runtime::block_on(run_graph_with(
+            &bp,
+            &HashMap::new(),
+            gateway,
+        ))
+        .expect("AI pipeline must run");
+
+        assert_eq!(res.stats.nodes_executed, 5);
+        // The model rewrote ',' to ';', string.split then produced three
+        // values and array.length counted them: the AI output really
+        // flowed into another functional node.
+        assert_eq!(
+            res.outputs.get("count").and_then(|v| v.as_f64()),
+            Some(3.0)
+        );
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt, "1,2,3");
+        assert_eq!(calls[0].provider.as_str(), "openai");
     }
 
     #[test]
@@ -429,7 +642,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).unwrap();
+        let res = run_sync(&bp, &ext).unwrap();
         // math.add serialises through `f64_to_value` → Number::Float;
         // serde_json's `as_i64` only returns Some for integer-stored
         // numbers, so compare via `as_f64`.
@@ -577,7 +790,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("DAG with duplicate edges must run");
+        let res = run_sync(&bp, &ext).expect("DAG with duplicate edges must run");
         assert_eq!(res.stats.nodes_executed, 4);
     }
 
@@ -662,7 +875,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("exec-pin blueprint must run");
+        let res = run_sync(&bp, &ext).expect("exec-pin blueprint must run");
         assert_eq!(res.stats.nodes_executed, 3);
         assert_eq!(res.logs.len(), 1);
         assert_eq!(res.logs[0].label, "DONE");
@@ -712,7 +925,7 @@ mod tests {
             }],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("unwired-then_in must not block");
+        let res = run_sync(&bp, &ext).expect("unwired-then_in must not block");
         assert_eq!(res.stats.nodes_executed, 2);
         assert_eq!(res.logs.len(), 1);
         assert_eq!(res.logs[0].label, "OK");
@@ -894,7 +1107,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("forced-order exec chain must run");
+        let res = run_sync(&bp, &ext).expect("forced-order exec chain must run");
         assert_eq!(res.stats.nodes_executed, 8);
         assert_eq!(res.logs.len(), 2);
         // The exact assertion that PROVES ordering was forced:
@@ -995,7 +1208,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("inline-default fallback must run");
+        let res = run_sync(&bp, &ext).expect("inline-default fallback must run");
         assert_eq!(
             res.outputs.get("result").and_then(|v| v.as_f64()),
             Some(10.0),
@@ -1088,7 +1301,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext).expect("wired-overrides-default must run");
+        let res = run_sync(&bp, &ext).expect("wired-overrides-default must run");
         // 100 (lit_a → a) + 100 (lit_b → b). params.a=7 ignored.
         assert_eq!(
             res.outputs.get("result").and_then(|v| v.as_f64()),
@@ -1166,7 +1379,7 @@ mod tests {
             }],
         );
         let ext = HashMap::new();
-        let res = run_graph(&bp, &ext)
+        let res = run_sync(&bp, &ext)
             .expect("two-sibling logger-priority DAG must run");
         // `log_z` is the second node executed; `a` is third. The
         // `a < z` alphabetical tie-break alone would have produced
@@ -1222,7 +1435,7 @@ mod tests {
             ],
         );
         let ext = HashMap::new();
-        let err = run_graph(&bp, &ext).unwrap_err();
+        let err = run_sync(&bp, &ext).unwrap_err();
         assert!(matches!(err, ExecError::Cycle(_)));
     }
 }
