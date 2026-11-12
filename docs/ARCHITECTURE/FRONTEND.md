@@ -22,8 +22,9 @@ El frontend es una app SvelteKit + Svelte 5 + TypeScript. El runtime es una úni
 | `src/lib/components/Editor.svelte` | 236 | El canvas. Envuelve `<SvelteFlow>`, dueño del drag/drop y de `isValidConnection`. |
 | `src/lib/components/nodes/BlueprintNode.svelte` | 378 | Renderer por nodo. Un único componente para todos los kinds; renderiza header, body, handles y un editor inline de params + botón delete. |
 | `src/lib/components/nodes/index.ts` | 12 | El map `nodeTypes` que consume Svelte Flow (hoy sólo `{ default: BlueprintNode }`). |
-| `src/lib/components/Inspector.svelte` | 329 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). |
+| `src/lib/components/Inspector.svelte` | 341 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). Renderiza `number` / `string` / `textarea` / `boolean` / `select`. |
 | `src/lib/components/ResultsPanel.svelte` | 240 | Panel inferior. Renderiza `RunResult.outputs`, `RunResult.logs`, y un botón Run. |
+| `src/lib/components/AiKeysDialog.svelte` | ~250 | Diálogo de claves de proveedores IA (botón **AI Keys** en la toolbar). Llama a `ai_key_status` / `ai_set_key` / `ai_clear_key`. **Única** vía de entrada de una clave. |
 
 ## Build / configs de runtime
 

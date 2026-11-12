@@ -84,7 +84,7 @@ En runtime colaboran tres capas, comunicándose por JSON sobre el bridge IPC de 
 }
 ```
 
-`schema_version: 1` es la única versión en producción hoy. La constante vive en `src-tauri/src/blueprint.rs: SCHEMA_VERSION`. Véase *Bumping the schema* en `docs/MAINTAINING.md` cuando introduzcas algo que rompa ficheros antiguos.
+`schema_version: 1` es la única versión en producción hoy. La constante vive en `src-tauri/src/blueprint.rs: SCHEMA_VERSION`. Véase *Bumping the schema* en [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md) cuando introduzcas algo que rompa ficheros antiguos.
 
 ## Flujo de datos en un Run
 
@@ -93,7 +93,7 @@ En runtime colaboran tres capas, comunicándose por JSON sobre el bridge IPC de 
 3. `runBlueprint` invoca `composeBlueprint(meta, …)` para producir un `Blueprint` completo, hace `JSON.stringify` y dispara `'run_blueprint'` con `{ json, inputs }`.
 4. El comando Rust `run_blueprint` (`src-tauri/src/lib.rs`) parsea el JSON y llama a `run_graph(&bp, &inputs)` desde `executor/runner.rs`.
 5. `run_graph` construye el índice de edges entrantes, hace Kahn sort, y luego itera el orden. Por cada nodo pide al registro en `executor/nodes/mod.rs` su `NodeExec` (un puntero a función), recoge inputs de outputs previos, ejecuta con sus `params`, y guarda outputs en un lookup `HashMap<(node_id, port_id), Value>`.
-6. `io.output` escribe en `EvalCtx.outputs`, `io.logger` añade a `EvalCtx.logs`. Ambos llegan al `RunResult` final que vuelve por el bridge IPC.
+6. `io.output` escribe en `EvalCtx.outputs`, `io.logger` añade a `EvalCtx.logs`. Cualquier nodo puede hacer lo mismo con `ctx.debug/info/warn/error(label, value)`; la entrada guarda `level`, `node_id` y `kind` además del valor. Todo llega al `RunResult` final que vuelve por el bridge IPC — y, si el run falla, las entradas escritas hasta el fallo viajan en el `RunOutcome` (`ok: false`) en lugar de perderse.
 7. El frontend guarda `result` en `let runResult = $state<RunResult | null>(null)` y `ResultsPanel` lo renderiza vía `renderValue()` (en `runner-io.ts`) con un cap de 24 elementos para arrays.
 
 ## Invariantes clave — léelas antes de cambiar nada
@@ -128,4 +128,4 @@ En runtime colaboran tres capas, comunicándose por JSON sobre el bridge IPC de 
 - **Edge / Connection** — Un cable entre dos puertos identificados por `(sourceNode, sourcePort, targetNode, targetPort)`.
 - **External input** — Un valor pasado en tiempo de ejecución, keyed por el `params.name` de cualquier nodo `io.input` del grafo.
 - **Node executor** — `NodeExec = fn(&NodeInputs, &Map<String, Value>, &mut EvalCtx) -> Result<NodeOutputs, ExecError>`. Pura salvo por side-effects vía `EvalCtx`.
-- **Run result** — `{ outputs: HashMap<name, Value>, logs: Vec<LogEntry>, stats: RunStats }` devuelto por el IPC.
+- **Run outcome** — `{ ok, outputs, logs, stats, error }` devuelto por el IPC. `run_blueprint` nunca rechaza por un fallo de ejecución: `ok: false` + `error` + los logs acumulados, para que el panel lateral pueda explicar el fallo. `LogEntry` es `{ level: debug|info|warn|error, node_id, kind, label, value }`, y el runner añade una última entrada `run failed` con el mensaje.

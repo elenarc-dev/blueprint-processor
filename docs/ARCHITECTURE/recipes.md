@@ -1,4 +1,4 @@
-# Mantenimiento de Blueprint Processor
+# Recetas de mantenimiento (Blueprint Processor)
 
 Un cookbook práctico para extender la aplicación. Cada receta lista exactamente qué ficheros tocar y en qué orden.
 
@@ -192,6 +192,80 @@ pnpm check                                       # svelte-check / tsc
 ```
 
 Si añades código Rust: al menos un test unitario positivo por cada nuevo node executor. Si añades lógica de frontend: al menos un smoke test manual de `pnpm tauri dev` del nuevo flujo.
+
+## Añadir un nodo async (hoy, solo nodos IA)
+
+Un nodo que debe esperar I/O (una llamada de red) no cabe en
+`NodeExec`: un puntero a función no puede devolver `impl Future`. Va al
+registro async.
+
+1. **Executor**: crea `executor/nodes/<kind_snake>.rs` con
+
+   ```rust
+   pub fn exec<'a>(
+       inputs: &'a Map<String, Value>,   // owned: los clona el runner
+       params: &'a Map<String, Value>,
+       env: &'a AiEnv,
+   ) -> Pin<Box<dyn Future<Output = Result<NodeOutputs, ExecError>> + Send + 'a>> {
+       Box::pin(async move { /* … */ })
+   }
+   ```
+
+   La credencial NO se lee de `params`: se pide al gateway
+   (`env.gateway.complete(&request)`), que la resuelve desde
+   `SecretStore`.
+
+2. **Registro**: `pub mod <kind_snake>;` y una línea en
+   `setup_async_registry()` — **no** en `setup_registry()`. Un kind debe
+   estar en exactamente una de las dos tablas.
+
+3. **Catálogo**: entrada normal en `NODE_CATALOG`. Si el nodo necesita
+   texto largo, usa `ParamField` tipo `textarea`.
+
+4. **Tests**: inyecta `ai::mock::MockGateway` y llama a
+   `run_graph_with(&bp, &inputs, gateway)` dentro de
+   `tauri::async_runtime::block_on(...)`. Nunca uses la red ni claves
+   reales en `cargo test`.
+
+## Escribir en el log del run desde un nodo
+
+Todo nodo puede dejar rastro en el panel **Logs** sin declarar puertos
+nuevos. `EvalCtx` trae cuatro atajos y el runner rellena `node_id` y
+`kind` por ti:
+
+```rust
+use serde_json::json;
+
+pub fn exec(
+    inputs: &NodeInputs<'_>,
+    params: &Map<String, Value>,
+    ctx: &mut EvalCtx<'_>,
+) -> Result<NodeOutputs, ExecError> {
+    let rows = /* … */;
+    ctx.debug("candidate", json!({ "count": rows.len() }));   // oculto salvo filtro
+    ctx.info("rows kept", json!(rows.len()));
+    if skipped > 0 {
+        ctx.warn("skipped malformed rows", json!(skipped));
+    }
+    Ok(single("out", /* … */))
+}
+```
+
+Niveles: `debug` → `info` → `warn` → `error`. El valor es cualquier
+`serde_json::Value`; los escalares (`&str`, `bool`, números) entran
+por `Into<Value>`, y un `&Value` se pasa con `.clone()`.
+
+Reglas:
+
+- **No dupliques `node_id`/`kind` en el label**: ya están en la entrada y
+  el panel filtra por ellos.
+- **`io.logger` es la versión sin código** (puerto `in` + params `label`
+  y `level`); úsala cuando el valor ya fluye por el grafo.
+- **Si el nodo aborta con `Err(...)`, no hace falta loggear el error**: el
+  runner lo adjunta al fallo junto con las entradas previas, así que el
+  panel y el botón *Copy* muestran hasta dónde llegó el run.
+- Los logs son efímeros: viven en el `RunResult` de esa ejecución, no se
+  escriben en disco ni se serializan con el blueprint.
 
 ## Pitfalls comunes
 

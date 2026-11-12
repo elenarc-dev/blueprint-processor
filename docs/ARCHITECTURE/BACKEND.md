@@ -14,6 +14,10 @@ Todo el código backend vive en `src-tauri/src/`. Las dependencias Cargo están 
 | `executor/runner.rs` | 345 | `run_graph()` = Kahn topo + ejecución por nodo. Dos tests `#[cfg(test)]` de integración al final del fichero. |
 | `executor/nodes/mod.rs` | 107 | El registro (`setup_registry`); declara todos los `pub mod` por nodo y el `test_helpers` compartido bajo `#[cfg(test)]`. |
 | `executor/nodes/*.rs` | 20×40–112 | UN FICHERO POR KIND. Cada uno exporta `pub fn exec(...)` y contiene su propio `#[cfg(test)] mod tests`. |
+| `ai/mod.rs` | ~180 | Capa de IA: `AiProviderKind`, `AiRequest`, `AiError`, `AiGateway` (trait dyn-safe), `AiEnv`, `RigGateway`, `UnconfiguredGateway`. |
+| `ai/providers.rs` | ~220 | ÚNICO fichero que conoce `rig-core`. Traduce a OpenAI Chat Completions (con `base_url`) y Anthropic Messages; reintentos acotados. |
+| `ai/secrets.rs` | ~230 | `SecretStore`: claves API en `<app_data_dir>/secrets.json`, escritura atómica y `0600` en Unix. |
+| `ai/mock.rs` | ~45 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas. |
 
 ## `main.rs`
 
@@ -53,9 +57,12 @@ La impl de `Serialize` para `BlueprintError` (y la equivalente para `ExecError` 
 |---------|-----------|-----------|---------------------|
 | `save_blueprint(json, path)` | El JSON del `Blueprint` completo + un path absoluto que el usuario eligió en un diálogo Save | `SaveResult { path, bytes }` | `capabilities/default.json` → `permissions: ["core:default", "dialog:default"]` + el comando entra al set deny-by-default de Tauri 2. |
 | `load_blueprint(path)` | Path absoluto de un diálogo Open | El string JSON normalizado | Mismo set. |
-| `run_blueprint(json, inputs)` | JSON del Blueprint + `HashMap<String, Value>` keyed por `params.name` de los nodos `io.input` | `RunResult` | Mismo set. |
+| `run_blueprint(json, inputs)` | JSON del Blueprint + `HashMap<String, Value>` keyed por `params.name` de los nodos `io.input` | `RunResult` | Mismo set. Es `async` porque `ai.*` espera llamadas de red. |
+| `ai_key_status()` | ninguno | `Vec<SecretStatus>` (`provider`, `configured`, `hint`) | Mismo set. Nunca devuelve la clave. |
+| `ai_set_key(provider, key)` | Proveedor canónico + clave en claro | `Vec<SecretStatus>` | Mismo set. |
+| `ai_clear_key(provider)` | Proveedor canónico | `Vec<SecretStatus>` | Mismo set. |
 
-`save_blueprint` también normaliza ficheros legacy con `schema_version == 0` a la versión actual mientras pasan (véase *Bumping the schema* en `docs/MAINTAINING.md`).
+`save_blueprint` también normaliza ficheros legacy con `schema_version == 0` a la versión actual mientras pasan (véase *Bumping the schema* en [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md)).
 
 ### `write_atomically(path, bytes)`
 
@@ -297,6 +304,14 @@ El registro. Lo construimos en cada llamada a `run_graph` (es barato — 20 inse
 
 Cuando añadas un nodo, **añade una línea aquí** en el bloque de la categoría correspondiente.
 
+### `pub fn setup_async_registry() -> HashMap<String, AsyncNodeExec>`
+
+Segundo registro, solo para kinds que deben esperar I/O (hoy `ai.*`).
+`AsyncNodeExec` recibe **inputs owned** y devuelve un futuro boxeado, porque
+un puntero a función no puede devolver `impl Future`. Un kind debe estar en
+exactamente una de las dos tablas; el runner consulta la async primero y
+cae a la síncrona si no hay entrada. Ver [`decisions.md`](decisions.md) ADR-002.
+
 ### `#[cfg(test)] pub mod test_helpers`
 
 Dos helpers expuestos a los `#[cfg(test)] mod tests` de cada nodo:
@@ -356,12 +371,30 @@ Cada entrada abajo es el mapeo kind → fichero más el contrato del ejecutor (u
 | `io.output` | `io_output.rs` | Escribe `inputs["in"]` (o `null`) en `ctx.outputs[params.name]`. Emite `empty_outputs()`. |
 | `io.logger` | `io_logger.rs` | Empuja `LogEntry { node_id, label: params.label, value: inputs["in"] }` a `ctx.logs`. Emite `empty_outputs()`. |
 
-### Añadir un nodo — resumen (véase `docs/MAINTAINING.md` para la receta)
+### Añadir un nodo — resumen (véase [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md) para la receta completa)
 
 1. Crea `src-tauri/src/executor/nodes/<kind_snake>.rs` con `pub fn exec(...)` + uno o dos `#[cfg(test)]` casos usando `ctx_with`.
 2. Añade `pub mod <kind_snake>;` en `nodes/mod.rs` y una línea en `setup_registry`.
 3. Añade una entrada NodeDef a `NODE_CATALOG` en `src/lib/nodes/catalog.ts`.
 4. (Opcional) Añade edición inline en `BlueprintNode.svelte` para nuevos `ParamField` kinds — normalmente no hace falta (`number` / `string` / `boolean` / `select` cubren las necesidades de hoy).
+
+## `ai/` — proveedores externos
+
+El motor no habla HTTP: `runner.rs` recibe un `Arc<dyn AiGateway>` y los
+nodos `ai.*` lo usan a través de `AiEnv`. `RigGateway` resuelve la clave
+desde `SecretStore` y delega en `providers::complete`, que es el único
+sitio que importa `rig-core`.
+
+**Las claves no están en el blueprint.** `BlueprintNode.params` viaja al
+fichero `.blueprint.json`, que el usuario comparte; una clave ahí sería
+una fuga. Por eso el nodo declara `provider`/`model`/`base_url` y la
+credencial vive en el `SecretStore` (ver [`decisions.md`](decisions.md),
+ADR-003 y ADR-004).
+
+Convención de claves: `secrets.json` es un mapa plano
+`{ "<provider>": "<key>" }` con nombres canónicos (`openai`,
+`anthropic`); `ai_key_status` deriva el hint de los últimos 4 caracteres y
+solo para claves de 8+ caracteres.
 
 ## Tests
 

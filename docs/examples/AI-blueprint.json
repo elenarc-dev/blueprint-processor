@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "id": "8cd7461c-ecf7-4988-8cd1-5a2ebdcfa322",
+  "name": "Untitled Blueprint",
+  "description": "",
+  "created_at": "2026-11-11T23:22:43.687Z",
+  "updated_at": "2026-11-11T23:36:48.301Z",
+  "nodes": [
+    {
+      "id": "a1282714-9fe5-47c3-9957-01057d25d6f6",
+      "kind": "literal.json",
+      "category": "Literal",
+      "position": {
+        "x": 348.0,
+        "y": 240.0
+      },
+      "label": "JSON",
+      "params": {
+        "value": "[   \"Necesito que añadáis autenticación mediante Google porque muchos usuarios no quieren crear una contraseña.\",   \"La aplicación se cierra inesperadamente cuando intento subir una imagen PNG de más de 5 MB.\",   \"¿Es posible exportar los informes a Excel?\",   \"El sistema tarda casi 20 segundos en cargar el dashboard desde ayer.\",   \"Quiero poder cambiar el color principal de la interfaz desde los ajustes.\",   \"No recibo el correo de recuperación de contraseña, aunque he comprobado la carpeta de spam.\",   \"¿Cómo puedo conectar mi cuenta con una aplicación externa mediante API?\",   \"Sería interesante añadir notificaciones cuando una tarea termine de ejecutarse.\",   \"Al eliminar un proyecto, también desaparecen los documentos de otros proyectos.\",   \"La búsqueda no encuentra resultados cuando utilizo caracteres especiales como ñ o tildes.\",   \"Necesito un botón para duplicar proyectos existentes.\",   \"¿La aplicación permite trabajar con varios usuarios simultáneamente?\",   \"Después de actualizar a la última versión, el sistema muestra una pantalla en blanco.\",   \"Estaría bien poder programar informes para que se generen automáticamente cada lunes.\",   \"No puedo modificar mi dirección de correo electrónico desde el perfil.\" ]"
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "id": "value",
+          "name": "Value",
+          "type": "any"
+        }
+      ]
+    },
+    {
+      "id": "61f6144d-1b7e-41d9-bb22-d2ec3085ce08",
+      "kind": "ai.completion",
+      "category": "AI",
+      "position": {
+        "x": 684.0,
+        "y": 276.0
+      },
+      "label": "Completion",
+      "params": {
+        "provider": "openai",
+        "model": "google/gemma-4-e4b",
+        "base_url": "http://127.0.0.1:1234",
+        "prompt": "Eres un sistema especializado en analizar y clasificar mensajes de usuarios de una aplicación de software.\n\nRecibirás un único texto. Debes clasificarlo según las siguientes categorías y prioridades.\n\n**Categorías:**\n- `bug`: error o comportamiento inesperado.\n- `feature_request`: solicitud de una nueva funcionalidad o mejora.\n- `question`: pregunta o solicitud de información.\n- `task`: petición de una acción concreta que no encaje en las categorías anteriores.\n\n**Prioridades:**\n- `low`: impacto mínimo o mejora opcional.\n- `medium`: inconveniente moderado o funcionalidad útil.\n- `high`: problema importante que afecta a una funcionalidad relevante.\n- `critical`: problema grave que impide utilizar una parte esencial del sistema o provoca pérdida de datos.\n\n**Formato de respuesta obligatorio:**\n\n- Si puedes clasificar el mensaje con suficiente información, responde exclusivamente con la categoría y la prioridad separadas por una coma y un espacio.\n\n  Ejemplo: `bug, high`\n\n- Si necesitas información adicional para clasificarlo correctamente, responde exclusivamente:\n\n  `need_info`\n\n**Reglas:**\n- No incluyas explicaciones, justificaciones ni texto adicional.\n- No utilices Markdown ni bloques de código.\n- No inventes información.\n- Si el mensaje es ambiguo y no permite determinar su categoría o prioridad con suficiente confianza, responde `need_info`.\n- No confundas preguntas sobre funcionalidades existentes con solicitudes de nuevas funcionalidades.\n- No asignes prioridad crítica simplemente porque el usuario esté molesto.\n- Respeta estrictamente los valores permitidos.\n- Devuelve siempre una única respuesta.",
+        "system": "",
+        "temperature": 0.2,
+        "max_tokens": 512,
+        "concurrency": 1
+      },
+      "inputs": [
+        {
+          "id": "then_in",
+          "name": "Then",
+          "type": "exec"
+        },
+        {
+          "id": "prompt",
+          "name": "Prompt",
+          "type": "string-or-array"
+        },
+        {
+          "id": "data",
+          "name": "Data",
+          "type": "any"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "then_out",
+          "name": "Then",
+          "type": "exec"
+        },
+        {
+          "id": "out",
+          "name": "Out",
+          "type": "string-or-array"
+        }
+      ]
+    },
+    {
+      "id": "aa50344d-408a-456e-a418-fbb8d58fa6c0",
+      "kind": "io.output",
+      "category": "IO",
+      "position": {
+        "x": 1020.0,
+        "y": 288.0
+      },
+      "label": "Output",
+      "params": {
+        "name": "output"
+      },
+      "inputs": [
+        {
+          "id": "then_in",
+          "name": "Then",
+          "type": "exec"
+        },
+        {
+          "id": "in",
+          "name": "In",
+          "type": "any"
+        }
+      ],
+      "outputs": []
+    }
+  ],
+  "connections": [
+    {
+      "id": "e_a1282714-9fe5-47c3-9957-01057d25d6f6__61f6144d-1b7e-41d9-bb22-d2ec3085ce08__a2b7lu",
+      "sourceNode": "a1282714-9fe5-47c3-9957-01057d25d6f6",
+      "sourcePort": "value",
+      "targetNode": "61f6144d-1b7e-41d9-bb22-d2ec3085ce08",
+      "targetPort": "data"
+    },
+    {
+      "id": "e_61f6144d-1b7e-41d9-bb22-d2ec3085ce08__aa50344d-408a-456e-a418-fbb8d58fa6c0__qz8rg8",
+      "sourceNode": "61f6144d-1b7e-41d9-bb22-d2ec3085ce08",
+      "sourcePort": "out",
+      "targetNode": "aa50344d-408a-456e-a418-fbb8d58fa6c0",
+      "targetPort": "in"
+    }
+  ],
+  "metadata": {
+    "author": null,
+    "tags": [],
+    "inputs": []
+  }
+}
