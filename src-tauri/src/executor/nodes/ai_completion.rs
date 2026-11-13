@@ -46,8 +46,10 @@
 //! **owned** inputs: the runner clones them so the boxed future never
 //! borrows the per-iteration locals.
 //!
-//! Credentials are never read from `params`. The gateway resolves the API
-//! key from the app's secret store, keyed by provider.
+//! Credentials are never read from `params`. Providers — their kind,
+//! endpoint and API key — are configured **globally** (toolbar → AI
+//! Providers) and reach the node through `AiGateway::providers`; the node
+//! only names a model. See [`resolve_target`] for the exact cascade.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -56,7 +58,7 @@ use std::sync::Arc;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use serde_json::{Map, Value};
 
-use crate::ai::{AiEnv, AiProviderKind, AiRequest};
+use crate::ai::{AiEnv, AiProviderKind, AiRequest, ProviderInfo};
 use crate::executor::{single, value_to_string, ExecError, NodeOutputs};
 
 /// Placeholder for the `data` input inside the prompt text.
@@ -75,32 +77,14 @@ async fn run(
     params: &Map<String, Value>,
     env: &AiEnv,
 ) -> Result<NodeOutputs, ExecError> {
-    let provider_raw = params
-        .get("provider")
-        .and_then(Value::as_str)
-        .unwrap_or("openai");
-    let provider = AiProviderKind::parse(provider_raw).ok_or_else(|| ExecError::Node {
-        node: env.node_id.clone(),
-        message: format!(
-            "unknown AI provider '{provider_raw}' (expected one of: {})",
-            AiProviderKind::ALL.join(", ")
-        ),
-    })?;
-
-    let model = params
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| provider.default_model().to_string());
-
-    let base_url = params
-        .get("base_url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let providers = env
+        .gateway
+        .providers()
+        .map_err(|e| ExecError::Node {
+            node: env.node_id.clone(),
+            message: e.to_string(),
+        })?;
+    let target = resolve_target(params, &providers, &env.node_id)?;
 
     let system = params
         .get("system")
@@ -132,9 +116,10 @@ async fn run(
         .iter()
         .map(|(prompt, data)| {
             Ok(AiRequest {
-                provider,
-                model: model.clone(),
-                base_url: base_url.clone(),
+                provider_id: target.provider_id.clone(),
+                provider: target.provider,
+                model: target.model.clone(),
+                base_url: target.base_url.clone(),
                 prompt: compose_prompt(prompt, data.as_ref(), &env.node_id)?,
                 system: system.clone(),
                 temperature,
@@ -294,6 +279,193 @@ fn compose_prompt(
     Ok(format!("{prompt}\n\n{text}"))
 }
 
+/// Where a node's `model` param actually points: which configured provider
+/// answers, under which model name, on which endpoint.
+struct Target {
+    provider_id: String,
+    provider: AiProviderKind,
+    model: String,
+    base_url: Option<String>,
+}
+
+/// Separates `providerId::model` in the node's `model` param. `::` rather
+/// than `:` because an Ollama tag is already `llama3.1:70b`: the split is
+/// made on the **first** `::` and everything after it stays the model name.
+const PROVIDER_SEPARATOR: &str = "::";
+
+/// Turn `params.model` into a concrete provider + model.
+///
+/// Cascade, strongest signal first:
+///
+/// 1. `providerId::model` — the node names a configured provider, so that
+///    provider's kind, endpoint and key are used verbatim. A model written
+///    after `::` is sent as-is even if the provider does not list it
+///    (advisory list, not a whitelist).
+/// 2. No providers configured at all — the pre-catalog behaviour: `kind`
+///    from the legacy `provider` param, endpoint from the legacy `base_url`
+///    param. Existing blueprints keep running unchanged, and the gateway
+///    reports a missing key exactly as before.
+/// 3. A model name one of the configured providers offers (exact match,
+///    then case-insensitive) — the provider that offers it wins, even over
+///    a stale `provider` param.
+/// 4. The `provider` param selects a *kind*, then the first configured
+///    provider of that kind.
+/// 5. One provider configured → it. Several → the first that has a key.
+///
+/// `base_url` precedence: a `base_url` left in an old blueprint means
+/// "talk to this endpoint" and wins over the provider's own, but only when
+/// the node does not name the provider explicitly with `::` — an explicit
+/// provider reference is a deliberate choice of endpoint.
+fn resolve_target(
+    params: &Map<String, Value>,
+    providers: &[ProviderInfo],
+    node: &str,
+) -> Result<Target, ExecError> {
+    let model = trimmed_param(params, "model");
+    let provider_raw = trimmed_param(params, "provider");
+    let legacy_url = non_empty(&trimmed_param(params, "base_url"));
+
+    // 1. `providerId::model`. Only a provider reference when there is a
+    //    catalog to point at: with nothing configured the whole string is
+    //    the model name, which is how every pre-catalog blueprint read it.
+    if !providers.is_empty() {
+        if let Some((id, rest)) = model.split_once(PROVIDER_SEPARATOR) {
+            let provider = find_by_id(providers, id).ok_or_else(|| {
+                node_error(
+                    node,
+                    format!(
+                        "model {model:?} selects provider '{}', which is not configured. Configured providers: {}",
+                        id.trim(),
+                        catalog_list(providers)
+                    ),
+                )
+            })?;
+            return Ok(target_of(provider, rest, None));
+        }
+    }
+
+    // 2. Nothing configured: the legacy params path, unchanged.
+    if providers.is_empty() {
+        let provider = parse_kind(&provider_raw, node)?;
+        let model = non_empty(&model)
+            .unwrap_or_else(|| provider.default_model().to_string());
+        return Ok(Target {
+            provider_id: String::new(),
+            provider,
+            model,
+            base_url: legacy_url,
+        });
+    }
+
+    // 3-5. Let the catalog decide.
+    let provider = pick_provider(providers, &model, &provider_raw, node)?;
+    Ok(target_of(provider, &model, legacy_url))
+}
+
+fn pick_provider<'p>(
+    providers: &'p [ProviderInfo],
+    model: &str,
+    provider_raw: &str,
+    node: &str,
+) -> Result<&'p ProviderInfo, ExecError> {
+    if let Some(provider) = providers.iter().find(|p| p.models.iter().any(|m| m == model)) {
+        return Ok(provider);
+    }
+    if let Some(provider) = providers
+        .iter()
+        .find(|p| p.models.iter().any(|m| m.eq_ignore_ascii_case(model)))
+    {
+        return Ok(provider);
+    }
+    if !provider_raw.is_empty() {
+        let kind = parse_kind(provider_raw, node)?;
+        return providers.iter().find(|p| p.kind == kind).ok_or_else(|| {
+            node_error(
+                node,
+                format!(
+                    "no configured provider of kind '{}' ({}). Configured providers: {}",
+                    kind.as_str(),
+                    provider_raw,
+                    catalog_list(providers)
+                ),
+            )
+        });
+    }
+    if providers.len() == 1 {
+        return Ok(&providers[0]);
+    }
+    Ok(providers.iter().find(|p| p.has_key).unwrap_or(&providers[0]))
+}
+
+fn target_of(provider: &ProviderInfo, model: &str, legacy_url: Option<String>) -> Target {
+    let model = non_empty(model).unwrap_or_else(|| {
+        // No model chosen: the provider's own first model, or the cheap
+        // default of its kind when the provider lists none.
+        provider
+            .models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| provider.kind.default_model().to_string())
+    });
+    Target {
+        provider_id: provider.id.clone(),
+        provider: provider.kind,
+        model,
+        base_url: legacy_url.or_else(|| provider.base_url.clone()),
+    }
+}
+
+fn find_by_id<'p>(providers: &'p [ProviderInfo], id: &str) -> Option<&'p ProviderInfo> {
+    let needle = id.trim().to_ascii_lowercase();
+    providers.iter().find(|p| p.id == needle)
+}
+
+/// An empty `provider` param means "whatever the default kind is", matching
+/// the old `unwrap_or("openai")`.
+fn parse_kind(raw: &str, node: &str) -> Result<AiProviderKind, ExecError> {
+    if raw.is_empty() {
+        return Ok(AiProviderKind::default());
+    }
+    AiProviderKind::parse(raw).ok_or_else(|| {
+        node_error(
+            node,
+            format!(
+                "unknown AI provider '{raw}' (expected one of: {})",
+                AiProviderKind::ALL.join(", ")
+            ),
+        )
+    })
+}
+
+fn trimmed_param(params: &Map<String, Value>, key: &str) -> String {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn non_empty(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn catalog_list(providers: &[ProviderInfo]) -> String {
+    providers
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn node_error(node: &str, message: String) -> ExecError {
+    ExecError::Node {
+        node: node.to_string(),
+        message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -303,7 +475,7 @@ mod tests {
 
     use super::exec;
     use crate::ai::mock::MockGateway;
-    use crate::ai::AiEnv;
+    use crate::ai::{AiEnv, AiProviderKind, ProviderInfo};
 
     fn upper(prompt: &str) -> String {
         prompt.to_uppercase()
@@ -407,6 +579,236 @@ mod tests {
         let err = call(inputs, params(json!({ "provider": "nope" })), &env).unwrap_err();
         assert!(err.to_string().contains("unknown AI provider"));
         assert!(gateway.calls().is_empty());
+    }
+
+    // ---------- provider / model resolution ----------
+
+    fn provider(
+        id: &str,
+        kind: AiProviderKind,
+        models: &[&str],
+        base_url: Option<&str>,
+    ) -> ProviderInfo {
+        ProviderInfo {
+            id: id.into(),
+            kind,
+            label: String::new(),
+            base_url: base_url.map(str::to_string),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            has_key: true,
+        }
+    }
+
+    fn gateway_with(providers: Vec<ProviderInfo>) -> Arc<MockGateway> {
+        Arc::new(MockGateway::new(echo).with_providers(providers))
+    }
+
+    /// The `model` param is `providerId::model`: the provider's kind,
+    /// endpoint and key come from the global config, the model verbatim.
+    #[test]
+    fn provider_id_in_the_model_selects_that_provider() {
+        let gateway = gateway_with(vec![
+            provider(
+                "ollama",
+                AiProviderKind::OpenAi,
+                &["llama3.1:70b"],
+                Some("http://127.0.0.1:11434/v1"),
+            ),
+            provider("openai", AiProviderKind::OpenAi, &["gpt-4o"], None),
+        ]);
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "ollama::llama3.1:70b" })),
+            &env,
+        )
+        .unwrap();
+        let calls = gateway.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider_id, "ollama");
+        assert_eq!(calls[0].provider, AiProviderKind::OpenAi);
+        // The Ollama tag keeps its own `:`: only the first `::` splits.
+        assert_eq!(calls[0].model, "llama3.1:70b");
+        assert_eq!(
+            calls[0].base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+
+        // The model list is advisory: a model typed by hand is still sent.
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "ollama::not-listed" })),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(gateway.calls()[1].model, "not-listed");
+    }
+
+    #[test]
+    fn unknown_provider_id_errors_before_calling_out() {
+        let gateway = gateway_with(vec![provider("openai", AiProviderKind::OpenAi, &["gpt-4o"], None)]);
+        let env = env_of(gateway.clone());
+
+        let err = call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "nope::gpt-4o" })),
+            &env,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not configured"), "{err}");
+        assert!(err.to_string().contains("openai"), "{err}");
+        assert!(gateway.calls().is_empty());
+    }
+
+    /// A model name wins over a stale `provider` param: the provider that
+    /// advertises it is the one that gets the call.
+    #[test]
+    fn a_configured_model_name_selects_its_provider() {
+        let gateway = gateway_with(vec![
+            provider("openai", AiProviderKind::OpenAi, &["gpt-4o"], None),
+            provider(
+                "claude",
+                AiProviderKind::Anthropic,
+                &["claude-3-5-haiku-latest"],
+                None,
+            ),
+        ]);
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "provider": "openai", "model": "claude-3-5-haiku-latest" })),
+            &env,
+        )
+        .unwrap();
+        let calls = gateway.calls();
+        assert_eq!(calls[0].provider_id, "claude");
+        assert_eq!(calls[0].provider, AiProviderKind::Anthropic);
+
+        // Case-insensitive fallback, for a hand-edited blueprint.
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "GPT-4o" })),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(gateway.calls()[1].provider_id, "openai");
+    }
+
+    /// With no model list and no model chosen, the provider's kind decides.
+    #[test]
+    fn blank_model_falls_back_to_the_kind_default() {
+        let gateway = gateway_with(vec![provider("claude", AiProviderKind::Anthropic, &[], None)]);
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "provider": "anthropic" })),
+            &env,
+        )
+        .unwrap();
+        let calls = gateway.calls();
+        assert_eq!(calls[0].provider_id, "claude");
+        assert_eq!(calls[0].provider, AiProviderKind::Anthropic);
+        assert_eq!(calls[0].model, "claude-3-5-haiku-latest");
+    }
+
+    #[test]
+    fn provider_param_without_a_matching_provider_errors() {
+        let gateway = gateway_with(vec![provider("ollama", AiProviderKind::OpenAi, &["llama3.1:70b"], None)]);
+        let env = env_of(gateway.clone());
+
+        let err = call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "provider": "anthropic" })),
+            &env,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no configured provider of kind 'anthropic'"), "{err}");
+        assert!(gateway.calls().is_empty());
+    }
+
+    /// Nothing chosen and several configured: pick one that can answer.
+    #[test]
+    fn several_providers_resolve_to_a_configured_one() {
+        let keyless = ProviderInfo {
+            has_key: false,
+            ..provider("ollama", AiProviderKind::OpenAi, &["llama3.1:70b"], Some("http://127.0.0.1:11434/v1"))
+        };
+        let gateway = gateway_with(vec![
+            keyless,
+            provider("hosted", AiProviderKind::OpenAi, &["gpt-4o"], None),
+        ]);
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "some-model" })),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(gateway.calls()[0].provider_id, "hosted");
+    }
+
+    /// The compatibility case: a blueprint written before providers were
+    /// global (`docs/examples/AI-blueprint.json`) and an app where nothing
+    /// is configured must behave exactly as before.
+    #[test]
+    fn legacy_params_still_run_with_an_empty_catalog() {
+        let gateway = gateway_with(Vec::new());
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({
+                "provider": "openai",
+                "model": "google/gemma-4-e4b",
+                "base_url": "http://127.0.0.1:1234",
+            })),
+            &env,
+        )
+        .unwrap();
+        let calls = gateway.calls();
+        // No provider record involved: the gateway resolves the key by kind.
+        assert_eq!(calls[0].provider_id, "");
+        assert_eq!(calls[0].provider, AiProviderKind::OpenAi);
+        assert_eq!(calls[0].model, "google/gemma-4-e4b");
+        assert_eq!(calls[0].base_url.as_deref(), Some("http://127.0.0.1:1234"));
+    }
+
+    /// A `base_url` left in an old blueprint still picks the endpoint, but
+    /// an explicit `providerId::model` is a deliberate choice of endpoint.
+    #[test]
+    fn legacy_base_url_wins_unless_the_provider_is_named() {
+        let gateway = gateway_with(vec![provider(
+            "ollama",
+            AiProviderKind::OpenAi,
+            &["llama3.1:70b"],
+            Some("http://127.0.0.1:11434/v1"),
+        )]);
+        let env = env_of(gateway.clone());
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "custom-model", "base_url": "http://127.0.0.1:1234" })),
+            &env,
+        )
+        .unwrap();
+        let calls = gateway.calls();
+        assert_eq!(calls[0].provider_id, "ollama");
+        assert_eq!(calls[0].base_url.as_deref(), Some("http://127.0.0.1:1234"));
+
+        call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "model": "ollama::llama3.1:70b", "base_url": "http://127.0.0.1:1234" })),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            gateway.calls()[1].base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
     }
 
     // ---------- data input ----------

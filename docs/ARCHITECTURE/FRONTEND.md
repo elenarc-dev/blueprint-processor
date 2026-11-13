@@ -17,14 +17,15 @@ El frontend es una app SvelteKit + Svelte 5 + TypeScript. El runtime es una úni
 | `src/lib/nodes/catalog.ts` | 302 | `NODE_CATALOG` — fuente única de verdad para qué puede colocar el usuario. Cada entrada es `kind, category, label, description, inputs[], outputs[], params[]`. |
 | `src/lib/utils/blueprint-io.ts` | 143 | `composeBlueprint`, `blueprintToFlow`, `makeFlowNode`, `newEdgeId`, `edgeFromConnection`. El puente entre estado runtime de Svelte Flow y la forma `Blueprint` en disco. |
 | `src/lib/utils/runner-io.ts` | 76 | `runBlueprint(meta, nodes, edges, inputs)` — invoca `'run_blueprint'` por IPC Tauri + helper `renderValue` para el panel de resultados. |
-| `src/lib/components/Toolbar.svelte` | 266 | Barra superior. Botones New / Load / Save; invoca `'save_blueprint'` / `'load_blueprint'`. |
+| `src/lib/components/Toolbar.svelte` | 372 | Barra superior. Botones New / Load / Save; invoca `'save_blueprint'` / `'load_blueprint'`. Abre el diálogo **AI Providers**. |
 | `src/lib/components/Palette.svelte` | 172 | Barra lateral izquierda. Drag source para cada node kind; fallback click-to-spawn vía `CustomEvent`. |
 | `src/lib/components/Editor.svelte` | 236 | El canvas. Envuelve `<SvelteFlow>`, dueño del drag/drop y de `isValidConnection`. |
 | `src/lib/components/nodes/BlueprintNode.svelte` | 378 | Renderer por nodo. Un único componente para todos los kinds; renderiza header, body, handles y un editor inline de params + botón delete. |
 | `src/lib/components/nodes/index.ts` | 12 | El map `nodeTypes` que consume Svelte Flow (hoy sólo `{ default: BlueprintNode }`). |
-| `src/lib/components/Inspector.svelte` | 341 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). Renderiza `number` / `string` / `textarea` / `boolean` / `select`. |
+| `src/lib/components/Inspector.svelte` | 788 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). Renderiza `number` / `string` / `textarea` / `boolean` / `select` / `model`. |
 | `src/lib/components/ResultsPanel.svelte` | 240 | Panel inferior. Renderiza `RunResult.outputs`, `RunResult.logs`, y un botón Run. |
-| `src/lib/components/AiKeysDialog.svelte` | ~250 | Diálogo de claves de proveedores IA (botón **AI Keys** en la toolbar). Llama a `ai_key_status` / `ai_set_key` / `ai_clear_key`. **Única** vía de entrada de una clave. |
+| `src/lib/components/AiProvidersDialog.svelte` | ~510 | Diálogo CRUD de proveedores IA (botón **AI Providers** en la toolbar). Llama a `ai_providers` / `ai_save_provider` / `ai_remove_provider` / `ai_clear_provider_key`. **Única** vía de entrada de una clave. |
+| `src/lib/utils/ai-config.svelte.ts` | ~90 | Espejo reactivo del catálogo global de proveedores (`aiProviders`, `ProviderStatus`, `ProviderDraft`, `refreshAiProviders`, `ensureAiProviders`, `setAiProviders`). Lo comparten el diálogo y el `<select>` de modelo del Inspector. |
 
 ## Build / configs de runtime
 
@@ -153,14 +154,17 @@ La fuente única de verdad para qué puede colocar el usuario en el canvas.
 ```ts
 export const CATEGORY_COLORS: Record<NodeCategory, string> = {
   Literal: '#a855f7', Math: '#06b6d4', String: '#22c55e',
-  Array: '#ec4899', IO: '#f59e0b',
+  Array: '#ec4899', IO: '#f59e0b', Json: '#eab308',
+  Image: '#8b5cf6', AI: '#dc2626',
 };
 
 export type ParamField =
   | { kind: 'number';  key: string; label: string; default: number;  min?, max?, step? }
   | { kind: 'string';  key: string; label: string; default: string;  placeholder? }
   | { kind: 'boolean'; key: string; label: string; default: boolean; }
-  | { kind: 'select';  key: string; label: string; default: string;  options: string[] };
+  | { kind: 'select';  key: string; label: string; default: string;  options: string[] }
+  | { kind: 'textarea'; key: string; label: string; default: string; placeholder?, rows? }
+  | { kind: 'model';   key: string; label: string; default: string };  // ver abajo
 
 export interface NodeDef {
   kind: string;
@@ -173,6 +177,12 @@ export interface NodeDef {
 }
 ```
 
+`textarea` es el `<textarea>` multi-línea del Inspector (prompts, system
+instructions): el cuerpo del nodo nunca lo muestra porque un prompt largo no
+cabe en una tarjeta. `model` tampoco: se renderiza como `<select>` de
+`<optgroup>` (una por proveedor configurado) y el valor guardado en
+`params.model` es `providerId::model` — ver *AI providers* abajo.
+
 ### Helpers exportados
 
 - `getDef(kind): NodeDef | undefined` — Lo usan `BlueprintNode.svelte`, `Inspector.svelte` y `blueprint-io.ts`.
@@ -180,7 +190,7 @@ export interface NodeDef {
 
 ### Categorías
 
-`CATEGORIES` es un array con las 5 categorías en orden de display. Añadir una categoría significa editar esta constante Y `CATEGORY_COLORS`.
+`CATEGORIES` es un array con las 8 categorías en orden de display (`Literal`, `Math`, `String`, `Json`, `Array`, `IO`, `Image`, `AI`). Añadir una categoría significa editar esta constante Y `CATEGORY_COLORS`.
 
 ## `src/lib/utils/blueprint-io.ts`
 
@@ -222,9 +232,40 @@ Los errores lanzados por Rust llegan como strings (porque la impl `Serialize` de
 
 Pretty-printer recursivo. Para que `RunResult.outputs.{name}` (que es un valor JSON arbitrario) se renderice razonablemente en el panel de resultados — strings, números, booleanos, `null/undefined → "null"`, arrays con cap de 24 elementos (`[…, +N more]`), objetos vía `JSON.stringify`.
 
+## `src/lib/utils/ai-config.svelte.ts`
+
+Espejo reactivo en el frontend del catálogo global de proveedores que vive
+en `src-tauri/src/ai/secrets.rs`. Mismo patrón que
+`blueprint-context.svelte.ts`: un único `$state` exportado que leen varios
+componentes (`AiProvidersDialog.svelte`, `Inspector.svelte`) en lugar de que
+cada uno invoque el backend por su cuenta.
+
+- `ProviderStatus` — lo que devuelve `ai_providers` (`id`, `kind`, `label`,
+  `baseUrl`, `models`, `configured`, `hint`). camelCase porque así entrega los
+  argumentos Tauri v2. `hint` es la vista de los últimos 4 caracteres que
+  calcula Rust; **la clave completa nunca cruza el IPC**.
+- `ProviderDraft` — lo que acepta `ai_save_provider`. `id` vacío pide al
+  backend que lo genere a partir del `kind`; `apiKey` vacío significa "deja la
+  clave guardada como está".
+- `aiProviders` — `$state<{ value, loaded }>`.
+- `refreshAiProviders()` / `ensureAiProviders()` — releen el catálogo;
+  `ensure` lo hace una sola vez por sesión. Fuera de un build Tauri (pnpm dev
+  en un navegador) `invoke` rechaza y el catálogo se queda vacío, que es
+  también el estado "nada configurado" en el que el backend cae a los params
+  legacy.
+- `setAiProviders(next)` — publica la lista que un comando recién aplicó (los
+  cuatro comandos `ai_*` responden el catálogo resultante al completo) para
+  que el `<select>` del Inspector se actualice sin un segundo round-trip.
+- `providerName(p)` — `label`, o `id` cuando no hay label.
+- `PROVIDER_KINDS` / `KIND_LABELS` — etiquetas humanas por kind; un kind
+  desconocido se muestra tal cual.
+
+El `<select>` del Inspector construye un `<optgroup>` por proveedor y guarda
+`providerId::model` (ver `kind: 'model'` en *catalog.ts*).
+
 ## `src/lib/components/Toolbar.svelte`
 
-Barra superior con Save / Load / New + campo de nombre.
+Barra superior con Save / Load / New + campo de nombre + botón **AI Providers**.
 
 ### Patrón snapshot (CRÍTICO)
 
@@ -251,6 +292,41 @@ const payload: Blueprint = composeBlueprint(meta, get(nodes), get(edges));
 ### Flujo New
 
 Si el grafo no está vacío, pregunta vía diálogo ask del SO (`ask({ kind: 'warning' })`). Si confirma, limpia `nodes`/`edges` y siembra un `makeMeta('Untitled Blueprint')` fresco.
+
+### AI Providers
+
+`let providersOpen = $state(false)` + `<AiProvidersDialog bind:open={providersOpen} />`. El botón solo abre el diálogo; todo el CRUD de proveedores (endpoints, listas de modelos y claves) vive en `AiProvidersDialog.svelte` y en el catálogo compartido de `ai-config.svelte.ts`.
+
+## `src/lib/components/AiProvidersDialog.svelte`
+
+Diálogo modal montado por la toolbar. Es la **única** vía por la que una API
+key entra en la app, y el único sitio donde se declara un endpoint: lo que un
+nodo puede guardar en `params` se escribe en el `.blueprint.json`, así que
+proveedor y credencial no pueden vivir ahí (ADR-003, ADR-005).
+
+- `open` es `$bindable`, así que la toolbar puede cerrarlo sin gestionar su
+  estado interno.
+- `$effect` sobre `open` relee el catálogo cada vez que se abre (`ensureAi-`
+  → `refreshAiProviders`), para reflejar proveedores añadidos en otra ventana
+  o editados a mano en `secrets.json`.
+- Cada fila es un `Row`: el draft (`id`, `kind`, `label`, `baseUrl`,
+  `modelsText` como textarea de una línea por modelo, `apiKey`) más lo que
+  Rust devuelve en solo-lectura (`configured`, `hint`). `apiKey` **siempre**
+  arranca vacío: el backend nunca devuelve la clave, y vacío significa "deja
+  la guardada"; para borrarla hay que pulsar *Clear key* (`ai_clear_provider_key`).
+- `draft` es un único objeto estable para el formulario "New provider"
+  (`NEW_ID = '__new__'`): recrearlo en cada render tiraría lo escrito. El `id`
+  lo genera el backend a partir del `kind` al guardar.
+- Cada comando (`ai_save_provider`, `ai_remove_provider`,
+  `ai_clear_provider_key`) responde el catálogo completo y `apply()` lo
+  publica en `aiProviders` vía `setAiProviders`, de modo que el `<select>` del
+  Inspector se actualiza sin invocar otra vez.
+- `confirmRemove` exige confirmar el borrado antes de llamar a
+  `ai_remove_provider`; `busy` deshabilita los controles mientras hay un
+  `invoke` en vuelo y `message` muestra el error devuelto por Rust.
+- Un proveedor sin clave pero con `Base URL` es legal: es un servidor local
+  (Ollama, LM Studio). Sin clave **y** sin endpoint, el propio diálogo avisa
+  que hace falta una de las dos.
 
 ## `src/lib/components/Palette.svelte`
 
@@ -343,7 +419,8 @@ Tan sólo `export const nodeTypes = { default: BlueprintNode } as const` y re-ex
 Panel derecho. Dos modos:
 
 - **Sin selección** — surface de `bpMeta` (name, description, schema actual, ID) + el `NODE_CATALOG` completo enumerado como referencia.
-- **Nodo seleccionado** — muestra el id del nodo seleccionado, kind, editor de label, y un editor de params dirigido por `def.params` (la misma escalera `ParamField` que el editor inline de `BlueprintNode`).
+- **Nodo seleccionado** — muestra el id del nodo seleccionado, kind, editor de label, y un editor de params dirigido por `def.params` (la misma escalera `ParamField` que el editor inline de `BlueprintNode`). Guardar hace `params: { ...d.params, [key]: value }`, así que los params legacy que el catálogo ya no declara (`provider`, `base_url`) sobreviven a una ida y vuelta por el Inspector.
+- `kind: 'model'` (el campo *Model* de `ai.completion`) se renderiza como `<select>` de `<optgroup>`, una por proveedor configurado, con una opción vacía `(default provider, default model)`. El valor guardado es `providerId::model`. Si el valor guardado no está en la lista (modelo escrito a mano, o un blueprint cuyo proveedor ya no existe) se añade una opción extra `... · not in the list` en vez de reiniciarlo en silencio. Sin proveedores configurados el `<select>` se sustituye por un text input con placeholder `providerId::model` y un hint que explica cómo añadirlos.
 
 En cada edición, se llama `onNodeSave(nodeId, patch)`. `+page.svelte::handleNodeSave` aplica el patch re-mapeando el nodo bajo el mismo id en el writable.
 

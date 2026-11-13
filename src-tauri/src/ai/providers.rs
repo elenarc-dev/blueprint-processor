@@ -168,6 +168,7 @@ mod tests {
     #[test]
     fn anthropic_gets_a_default_max_tokens() {
         let req = AiRequest {
+            provider_id: "anthropic".into(),
             provider: AiProviderKind::Anthropic,
             model: "claude-3-5-haiku-latest".into(),
             base_url: None,
@@ -183,6 +184,7 @@ mod tests {
     #[test]
     fn system_prompt_lands_in_the_preamble() {
         let req = AiRequest {
+            provider_id: "openai".into(),
             provider: AiProviderKind::OpenAi,
             model: "gpt-4o-mini".into(),
             base_url: None,

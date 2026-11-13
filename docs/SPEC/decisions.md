@@ -41,3 +41,47 @@ elemento), conservando el orden de entrada.
 **Consecuencias.** Un mismo nodo sirve para "resume esto" y para "clasifica
 cada fila de este dataset" sin nodos auxiliares. El coste es explícito:
 N filas = N llamadas, y `concurrency` acota cuántas van en vuelo.
+
+---
+
+## FD-002 — Los proveedores de IA se configuran una vez por máquina; el nodo solo elige modelo
+
+**Contexto.** Cada nodo `ai.completion` repetía proveedor, endpoint y modelo
+en sus params. Con dos destinos en la misma máquina (una cuenta de pago y un
+modelo local) el usuario reescribía lo mismo en cada nodo, y un blueprint no
+podía decir "usa lo que esta máquina tenga configurado" sin hardcodear una
+URL.
+
+**Decisión.**
+
+- La toolbar tiene **AI Providers**, un CRUD global de proveedores: nombre,
+  tipo de wire (`OpenAI-compatible` o `Anthropic`), `Base URL`, lista de
+  modelos (uno por línea) y API key. Es la única manera de introducir una
+  clave o un endpoint.
+- El nodo tiene un único campo de destino, *Model*, como desplegable agrupado
+  por proveedor. Lo que se guarda en el blueprint es
+  `providerId::model` (p. ej. `ollama::llama3.1:70b`).
+- Dejar *Model* vacío significa "el proveedor y el modelo por defecto": se
+  usa el único proveedor configurado (o el primero con clave) y su primer
+  modelo.
+- Un proveedor sin clave pero con `Base URL` es válido y aparece en el
+  desplegable: es un servidor local (Ollama, LM Studio). Sin clave y sin
+  `Base URL`, el diálogo pide una de las dos y el run reporta que falta la
+  clave.
+- El nombre visible de un proveedor se puede renombrar libremente sin afectar
+  a los blueprints: lo que estos guardan es su id, que no cambia. **Eliminar**
+  un proveedor sí afecta: un nodo que lo referenciaba falla con un mensaje
+  que lista los proveedores configurados.
+- Los blueprints guardados antes de esta decisión siguen ejecutando igual:
+  si un nodo conserva params `provider` y/o `base_url`, esos definen el
+  destino cuando el nodo no nombra un proveedor con `::`.
+  `docs/examples/AI-blueprint.json` es un ejemplo real de esa forma.
+
+**Consecuencias.** Dos blueprints en la misma máquina comparten proveedor,
+clave y endpoint: cambiar la clave o el endpoint en el diálogo afecta a
+todos. Un blueprint viaja limpio (sin credenciales ni URLs locales), pero
+abrirlo en otra máquina exige configurar allí un proveedor con el mismo id o
+re-elegir modelo en el Inspector. El modelo que ofrece el desplegable es la
+lista que el usuario escribió en el proveedor: se puede escribir cualquier
+otro modelo a mano y se envía tal cual. Decisión técnica correspondiente:
+ADR-005.

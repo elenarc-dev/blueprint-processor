@@ -18,6 +18,11 @@
 <script lang="ts">
   import type { BlueprintMeta, BlueprintInput } from '$lib/types/blueprint';
   import {
+    aiProviders,
+    ensureAiProviders,
+    providerName,
+  } from '$lib/utils/ai-config.svelte';
+  import {
     getDef,
     NODE_CATALOG,
   } from '$lib/nodes/catalog';
@@ -141,6 +146,40 @@
     );
     commitInputs(next);
   }
+
+  // ---------------------------------------------------------------------
+  // `kind: 'model'` params (the `ai.completion` Model field).
+  //
+  // Providers — endpoint, wire protocol, API key — are global app config
+  // (toolbar → AI Providers), never node params, so the dropdown is built
+  // from the shared catalog in `ai-config.svelte.ts`. The value stored in
+  // the blueprint is `providerId::model`; splitting on the FIRST `::` is
+  // what keeps a model named `llama3.1:70b` intact.
+  // ---------------------------------------------------------------------
+
+  // Read once per app session; runs client-side only, so a plain browser
+  // build (no Tauri `invoke`) simply leaves the catalog empty.
+  $effect(() => {
+    ensureAiProviders();
+  });
+
+  /** One optgroup per configured provider. */
+  const modelGroups = $derived(
+    aiProviders.value.map((p) => ({
+      id: p.id,
+      label: providerName(p),
+      models: [...new Set(p.models.map((m) => m.trim()).filter((m) => m !== ''))],
+    })),
+  );
+
+  /**
+   * Every value the dropdown offers. Used to detect a stored value it cannot
+   * show (a hand-typed model, or an older blueprint whose provider was since
+   * removed) so the select keeps it instead of silently resetting it.
+   */
+  const modelChoices = $derived(
+    new Set(modelGroups.flatMap((g) => g.models.map((m) => `${g.id}::${m}`))),
+  );
 </script>
 
 <aside class="inspector" class:collapsed={!open}>
@@ -299,6 +338,61 @@
                     <option value={opt}>{opt}</option>
                   {/each}
                 </select>
+              {:else if field.kind === 'model'}
+                {@const current = (d.params[field.key] as string | undefined) ?? ''}
+                {#if modelGroups.length > 0}
+                  <select
+                    value={current}
+                    onchange={(e) =>
+                      onNodeSave(selectedNode.id, {
+                        params: {
+                          ...d.params,
+                          [field.key]: e.currentTarget.value,
+                        },
+                      })}
+                  >
+                    <option value="">(default provider, default model)</option>
+                    {#each modelGroups as group (group.id)}
+                      <optgroup label={group.label}>
+                        {#each group.models as model (model)}
+                          <option value={`${group.id}::${model}`}>{model}</option>
+                        {/each}
+                        {#if group.models.length === 0}
+                          <option value={`${group.id}::`}>
+                            (no models listed — {group.label} default)
+                          </option>
+                        {/if}
+                      </optgroup>
+                    {/each}
+                    {#if current !== '' && !modelChoices.has(current)}
+                      <option value={current}>{current} · not in the list</option>
+                    {/if}
+                  </select>
+                  <p class="field-hint">
+                    Endpoint, protocol and API key come from the provider group —
+                    Toolbar → AI Providers. Only this choice is saved in the
+                    blueprint.
+                  </p>
+                {:else}
+                  <input
+                    type="text"
+                    placeholder="providerId::model"
+                    value={current}
+                    oninput={(e) =>
+                      onNodeSave(selectedNode.id, {
+                        params: {
+                          ...d.params,
+                          [field.key]: e.currentTarget.value,
+                        },
+                      })}
+                  />
+                  <p class="field-hint">
+                    No providers configured yet: add them in Toolbar → AI
+                    Providers, or type <code>providerId::model</code>. Blueprints
+                    saved before the global catalog keep their own <code>provider</code>
+                    / <code>base_url</code> params.
+                  </p>
+                {/if}
               {/if}
             </div>
           {/each}
@@ -491,6 +585,15 @@
     outline: none;
     border-color: #2d7cf1;
     box-shadow: 0 0 0 2px rgba(45, 124, 241, 0.2);
+  }
+  /* Explains a control without competing with it (the Model dropdown's
+     "where do these choices come from?" note). */
+  .field-hint {
+    margin: 4px 0 0;
+    font-size: 10.5px;
+    line-height: 1.45;
+    font-style: italic;
+    color: #71717a;
   }
 
   .check {

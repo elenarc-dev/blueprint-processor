@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use ai::{AiGateway, RigGateway, SecretStatus, SecretStore};
+use ai::{AiGateway, ProviderDraft, ProviderStatus, RigGateway, SecretStore};
 use blueprint::{Blueprint, SCHEMA_VERSION};
 use executor::{run_graph_with, ExecError, RunOutcome};
 use inventory::InventoryEntry;
@@ -152,35 +152,47 @@ async fn run_blueprint(
 }
 
 // ---------------------------------------------------------------------
-// AI credential commands — back the toolbar's "AI Keys" dialog.
+// AI provider commands — back the toolbar's "AI Providers" dialog.
 //
-// None of these return a key. `ai_key_status` answers `configured` plus a
-// last-4 hint, which is all the UI needs (AI-SEC-002).
+// Providers (kind, endpoint, model list) and their API keys are global
+// app configuration, never blueprint content. None of these commands
+// returns a key: `ai_providers` answers `configured` plus a last-4 hint,
+// which is all the UI needs (AI-SEC-002). Every command returns the full
+// resulting provider list so the dialog can refresh in one round-trip.
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-fn ai_key_status(app: tauri::AppHandle) -> Result<Vec<SecretStatus>, String> {
+fn ai_providers(app: tauri::AppHandle) -> Result<Vec<ProviderStatus>, String> {
     secret_store(&app)
         .map_err(|e| e.to_string())?
-        .status()
+        .statuses()
 }
 
 #[tauri::command]
-fn ai_set_key(
+fn ai_save_provider(
     app: tauri::AppHandle,
-    provider: String,
-    key: String,
-) -> Result<Vec<SecretStatus>, String> {
+    draft: ProviderDraft,
+) -> Result<Vec<ProviderStatus>, String> {
     let store = secret_store(&app).map_err(|e| e.to_string())?;
-    store.set(&provider, &key)?;
-    store.status()
+    store.save(draft)?;
+    store.statuses()
 }
 
 #[tauri::command]
-fn ai_clear_key(app: tauri::AppHandle, provider: String) -> Result<Vec<SecretStatus>, String> {
+fn ai_remove_provider(app: tauri::AppHandle, id: String) -> Result<Vec<ProviderStatus>, String> {
     let store = secret_store(&app).map_err(|e| e.to_string())?;
-    store.clear(&provider)?;
-    store.status()
+    store.remove(&id)?;
+    store.statuses()
+}
+
+#[tauri::command]
+fn ai_clear_provider_key(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Vec<ProviderStatus>, String> {
+    let store = secret_store(&app).map_err(|e| e.to_string())?;
+    store.clear_key(&id)?;
+    store.statuses()
 }
 
 // ---------------------------------------------------------------------
@@ -314,9 +326,10 @@ pub fn run() {
             save_blueprint,
             load_blueprint,
             run_blueprint,
-            ai_key_status,
-            ai_set_key,
-            ai_clear_key,
+            ai_providers,
+            ai_save_provider,
+            ai_remove_provider,
+            ai_clear_provider_key,
             inventory_list,
             inventory_add,
             inventory_remove,

@@ -14,10 +14,10 @@ Todo el código backend vive en `src-tauri/src/`. Las dependencias Cargo están 
 | `executor/runner.rs` | 345 | `run_graph()` = Kahn topo + ejecución por nodo. Dos tests `#[cfg(test)]` de integración al final del fichero. |
 | `executor/nodes/mod.rs` | 107 | El registro (`setup_registry`); declara todos los `pub mod` por nodo y el `test_helpers` compartido bajo `#[cfg(test)]`. |
 | `executor/nodes/*.rs` | 20×40–112 | UN FICHERO POR KIND. Cada uno exporta `pub fn exec(...)` y contiene su propio `#[cfg(test)] mod tests`. |
-| `ai/mod.rs` | ~180 | Capa de IA: `AiProviderKind`, `AiRequest`, `AiError`, `AiGateway` (trait dyn-safe), `AiEnv`, `RigGateway`, `UnconfiguredGateway`. |
+| `ai/mod.rs` | ~240 | Capa de IA: `AiProviderKind`, `AiRequest`, `AiError`, `AiGateway` (trait dyn-safe), `AiEnv`, `ProviderInfo`, `RigGateway`, `UnconfiguredGateway`. |
 | `ai/providers.rs` | ~220 | ÚNICO fichero que conoce `rig-core`. Traduce a OpenAI Chat Completions (con `base_url`) y Anthropic Messages; reintentos acotados. |
-| `ai/secrets.rs` | ~230 | `SecretStore`: claves API en `<app_data_dir>/secrets.json`, escritura atómica y `0600` en Unix. |
-| `ai/mock.rs` | ~45 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas. |
+| `ai/secrets.rs` | ~700 | `SecretStore`: catálogo global de proveedores (`id`, `kind`, `label`, `base_url`, `models`) y sus claves en `<app_data_dir>/secrets.json`, con migración del formato legacy, escritura atómica y `0600` en Unix. |
+| `ai/mock.rs` | ~55 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas, incluido `with_providers()` para poblar el catálogo. |
 
 ## `main.rs`
 
@@ -58,9 +58,16 @@ La impl de `Serialize` para `BlueprintError` (y la equivalente para `ExecError` 
 | `save_blueprint(json, path)` | El JSON del `Blueprint` completo + un path absoluto que el usuario eligió en un diálogo Save | `SaveResult { path, bytes }` | `capabilities/default.json` → `permissions: ["core:default", "dialog:default"]` + el comando entra al set deny-by-default de Tauri 2. |
 | `load_blueprint(path)` | Path absoluto de un diálogo Open | El string JSON normalizado | Mismo set. |
 | `run_blueprint(json, inputs)` | JSON del Blueprint + `HashMap<String, Value>` keyed por `params.name` de los nodos `io.input` | `RunResult` | Mismo set. Es `async` porque `ai.*` espera llamadas de red. |
-| `ai_key_status()` | ninguno | `Vec<SecretStatus>` (`provider`, `configured`, `hint`) | Mismo set. Nunca devuelve la clave. |
-| `ai_set_key(provider, key)` | Proveedor canónico + clave en claro | `Vec<SecretStatus>` | Mismo set. |
-| `ai_clear_key(provider)` | Proveedor canónico | `Vec<SecretStatus>` | Mismo set. |
+| `ai_providers()` | ninguno | `Vec<ProviderStatus>` (`id`, `kind`, `label`, `baseUrl`, `models`, `configured`, `hint`) | Mismo set. Nunca devuelve la clave. |
+| `ai_save_provider(draft)` | `ProviderDraft` (`id`, `kind`, `label`, `baseUrl`, `models`, `apiKey`): `id` vacío lo genera el almacén a partir del kind (`openai`, `openai-2`, …); `apiKey` vacío mantiene la clave ya guardada | `Vec<ProviderStatus>` | Mismo set. |
+| `ai_remove_provider(id)` | id del proveedor | `Vec<ProviderStatus>` | Mismo set. |
+| `ai_clear_provider_key(id)` | id del proveedor | `Vec<ProviderStatus>` | Mismo set. |
+
+Los cuatro responden la lista de proveedores resultante, así el diálogo se
+refresca en un único round-trip. Los DTO que cruzan el IPC van en
+camelCase (`#[serde(rename_all = "camelCase")]`) porque Tauri 2 entrega los
+argumentos de comando con ese formato, y ninguno puede contener `api_key`
+(ADR-003).
 
 `save_blueprint` también normaliza ficheros legacy con `schema_version == 0` a la versión actual mientras pasan (véase *Bumping the schema* en [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md)).
 
@@ -75,7 +82,9 @@ tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_dialog::init())
     .invoke_handler(tauri::generate_handler![
-        save_blueprint, load_blueprint, run_blueprint
+        save_blueprint, load_blueprint, run_blueprint,
+        ai_providers, ai_save_provider, ai_remove_provider, ai_clear_provider_key,
+        inventory_list, inventory_add, inventory_remove, inventory_path,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application")
@@ -381,20 +390,80 @@ Cada entrada abajo es el mapeo kind → fichero más el contrato del ejecutor (u
 ## `ai/` — proveedores externos
 
 El motor no habla HTTP: `runner.rs` recibe un `Arc<dyn AiGateway>` y los
-nodos `ai.*` lo usan a través de `AiEnv`. `RigGateway` resuelve la clave
-desde `SecretStore` y delega en `providers::complete`, que es el único
-sitio que importa `rig-core`.
+nodos `ai.*` lo usan a través de `AiEnv`. `RigGateway` lee el catálogo desde
+`SecretStore` y delega la llamada en `providers::complete`, que es el único
+sitio que importa `rig-core`. El trait expone `providers()` con default
+`Ok(Vec::new())`: solo `RigGateway` (almacén real) y `MockGateway`
+(`with_providers()`, para tests) lo sobrescriben.
 
-**Las claves no están en el blueprint.** `BlueprintNode.params` viaja al
-fichero `.blueprint.json`, que el usuario comparte; una clave ahí sería
-una fuga. Por eso el nodo declara `provider`/`model`/`base_url` y la
-credencial vive en el `SecretStore` (ver [`decisions.md`](decisions.md),
-ADR-003 y ADR-004).
+**Ni proveedores ni claves están en el blueprint.** `BlueprintNode.params`
+viaja al fichero `.blueprint.json`, que el usuario comparte; una clave ahí
+sería una fuga. El único param de IA que la UI escribe hoy es `model`, con
+valor `providerId::model` (ADR-005). `provider` y `base_url` siguen siendo
+params legacy que el ejecutor respeta —los blueprints anteriores a este
+cambio siguen corriendo— pero el Inspector ya no los edita. Ver
+[`decisions.md`](decisions.md), ADR-003, ADR-004 y ADR-005.
 
-Convención de claves: `secrets.json` es un mapa plano
-`{ "<provider>": "<key>" }` con nombres canónicos (`openai`,
-`anthropic`); `ai_key_status` deriva el hint de los últimos 4 caracteres y
-solo para claves de 8+ caracteres.
+### `secrets.rs` — el catálogo global
+
+Forma actual de `<app_data_dir>/secrets.json`:
+
+```json
+{ "providers": [ { "id": "ollama", "kind": "openai", "label": "Local",
+                   "base_url": "http://127.0.0.1:11434/v1",
+                   "models": ["llama3.1:70b"], "api_key": "" } ] }
+```
+
+- `id` es el handle estable al que apunta un nodo (`ollama::llama3.1:70b`) y
+  **nunca se renombra**: renombrar un proveedor solo toca `label`. Es
+  `canonical_id` (alfanumérico ASCII + `.` `-` `_`, en minúsculas); un draft
+  sin `id` recibe uno generado a partir del `kind` (`openai`, `openai-2`, …).
+  La búsqueda es case-insensitive (`lookup_id`) porque un blueprint editado a
+  mano puede no estar en minúsculas.
+- Varios proveedores del mismo `kind` son legales (OpenAI de pago *y* un
+  Ollama local, cada uno con su `base_url` y su clave).
+- `read()` acepta también la forma legacy, el mapa plano
+  `{ "<kind>": "<key>" }`, y la normaliza a registros cuyo `id` es el nombre
+  del `kind`. `write()` publica siempre el array, vía tmp + `rename` y `0600`.
+- La lectura es tolerante: una entrada ilegible se descarta con una línea de
+  log en vez de tumbar el catálogo entero.
+- Tres vistas del mismo almacén: `records()` (registro completo, clave
+  incluida — solo código del crate), `provider_infos()` (para el ejecutor,
+  sin clave) y `statuses()` (para el frontend, sin clave y con `hint` de los
+  últimos 4 caracteres solo si la clave tiene 8+).
+
+### `ai_completion.rs::resolve_target`
+
+Convierte `params.model` en proveedor + modelo + endpoint (`Target`) y
+recoge el `provider_id` que viaja en `AiRequest` hasta `RigGateway`.
+Cascada, señal más fuerte primero:
+
+1. `providerId::model` → ese proveedor, con su `kind`, su endpoint y su
+   clave tal cual; error explícito si no está configurado. El split se hace
+   en el **primer** `::`, así `llama3.1:70b` sobrevive. El catálogo vacío
+   desactiva esta rama: sin catálogo todo el string es el nombre del modelo.
+2. Sin proveedores configurados → comportamiento pre-catálogo exacto, con
+   `provider` y `base_url` legacy (incluido el error
+   `unknown AI provider 'x' (expected one of: openai, anthropic)`).
+3. Algún proveedor configurado ofrece ese modelo (match exacto, luego
+   case-insensitive) → ese proveedor gana, aunque el param `provider` esté
+   obsoleto.
+4. El param `provider` legacy selecciona el *kind* y se toma el primer
+   proveedor configurado de ese kind.
+5. Un único proveedor → ese; varios → el primero que tenga clave.
+
+Modelo vacío → primer modelo del proveedor, o `AiProviderKind::default_model()`
+si el proveedor no lista ninguno. `base_url` legacy gana al del proveedor
+salvo en la rama 1, donde nombrar el proveedor con `::` es una elección
+deliberada de endpoint.
+
+### Credenciales (`RigGateway`)
+
+Busca el registro exacto por `provider_id`; si no lo hay cae al `kind`, que
+cubre tanto un request sin proveedor (rama 2) como un almacén migrado del
+mapa legacy. Con `base_url` pero sin clave envía `LOCAL_API_KEY`
+(`"not-needed"`) — Rig exige una clave no vacía y Ollama / LM Studio la
+ignoran. Sin clave y sin endpoint propio: `AiError::MissingKey`.
 
 ## Tests
 

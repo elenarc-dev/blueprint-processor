@@ -2,15 +2,19 @@
 //!
 //! Three pieces, each with one reason to exist:
 //!
-//! 1. [`secrets`] — where an API key lives. **Never in a blueprint file.**
-//!    Blueprints are saved to disk, diffed and shared; a key in
-//!    `params` would leak the moment the user shares a graph.
+//! 1. [`secrets`] — where providers and their API keys live. **Globally,
+//!    never in a blueprint file.** Blueprints are saved to disk, diffed
+//!    and shared; a key in `params` would leak the moment the user shares
+//!    a graph, and a `base_url` in `params` would pin a machine-specific
+//!    endpoint to the graph. A node only names a model.
 //! 2. [`providers`] — translates an [`AiRequest`] into a provider call.
 //!    The only module that knows about `rig-core`, so the pre-1.0 API
 //!    churn of that crate stays contained.
 //! 3. [`AiGateway`] — the seam the executor sees. [`RigGateway`] is the
 //!    real one; `mock::MockGateway` lets `cargo test` run the complete
-//!    pipeline offline.
+//!    pipeline offline. The gateway also carries the provider catalog
+//!    (`providers`), which is the only way a node learns what exists to
+//!    pick from.
 //!
 //! `AiGateway` is object-safe on purpose: the async node registry stores
 //! executors as plain fn pointers, so the gateway has to travel as an
@@ -30,7 +34,7 @@ pub mod secrets;
 #[cfg(test)]
 pub mod mock;
 
-pub use secrets::{SecretStatus, SecretStore};
+pub use secrets::{ProviderDraft, ProviderStatus, SecretStore};
 
 /// Boxed future carrying the gateway's result. `Send` because the runner
 /// is awaited from a Tauri async command.
@@ -41,8 +45,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// `OpenAi` is the OpenAI-compatible wire (key + optional `base_url`),
 /// which also covers Groq, OpenRouter and local Ollama / LM Studio
 /// endpoints. `Anthropic` is the Messages wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AiProviderKind {
+    /// The default because `openai` is the wire almost every local server
+    /// (Ollama, LM Studio) and gateway (Groq, OpenRouter) speaks.
+    #[default]
     OpenAi,
     Anthropic,
 }
@@ -78,9 +85,34 @@ impl AiProviderKind {
     }
 }
 
+/// One provider the app is configured with, as the executor sees it.
+///
+/// Non-secret by construction: `has_key` replaces the key itself, so this
+/// can reach a node (which builds the Model dropdown) without a secret
+/// ever leaving the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    /// Stable handle, e.g. `ollama`. A node selects this provider by
+    /// writing `ollama::model`.
+    pub id: String,
+    pub kind: AiProviderKind,
+    /// Display name; empty means "show `id`".
+    pub label: String,
+    /// `None` means "the wire's own default endpoint".
+    pub base_url: Option<String>,
+    /// Models to offer in the node's dropdown. Advisory: a model typed by
+    /// hand in the blueprint is still honored.
+    pub models: Vec<String>,
+    pub has_key: bool,
+}
+
 /// One completion request, already resolved from a node's ports + params.
 #[derive(Debug, Clone)]
 pub struct AiRequest {
+    /// Configured provider to send to, by id. Empty means "not tied to a
+    /// provider record", which only happens on the pre-provider-catalog
+    /// path; the gateway then falls back to the provider kind.
+    pub provider_id: String,
     pub provider: AiProviderKind,
     pub model: String,
     pub base_url: Option<String>,
@@ -92,7 +124,7 @@ pub struct AiRequest {
 
 #[derive(Debug, Error)]
 pub enum AiError {
-    #[error("no API key configured for provider '{0}': add one in the toolbar's AI Keys dialog")]
+    #[error("no API key configured for provider '{0}': add one in the toolbar's AI Providers dialog")]
     MissingKey(String),
     #[error("AI provider '{provider}' failed: {message}")]
     Provider { provider: String, message: String },
@@ -106,6 +138,18 @@ pub enum AiError {
 /// gateway in an `Arc` across await points.
 pub trait AiGateway: Send + Sync {
     fn complete<'a>(&'a self, req: &'a AiRequest) -> BoxFuture<'a, Result<String, AiError>>;
+
+    /// Every provider the app is configured with. The `ai.completion`
+    /// node reads this once per run to turn "which model do I want" into
+    /// "which provider owns it".
+    ///
+    /// The default is an empty catalog: a gateway that has no provider
+    /// concept (a mock, an unconfigured runner) behaves exactly like an
+    /// app where the user configured nothing, which is the legacy
+    /// `provider` / `base_url` params path.
+    fn providers(&self) -> Result<Vec<ProviderInfo>, AiError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Per-node context handed to an async executor. Owns its strings (and
@@ -132,8 +176,13 @@ impl AiGateway for UnconfiguredGateway {
     }
 }
 
-/// Production gateway: reads the API key from the on-disk [`SecretStore`]
-/// and delegates the HTTP call to [`providers::complete`].
+/// Placeholder key for a provider whose `base_url` points at a local
+/// server that does not check credentials (Ollama, LM Studio). Rig's
+/// client config requires a non-empty key, and these endpoints ignore it.
+const LOCAL_API_KEY: &str = "not-needed";
+
+/// Production gateway: reads the provider record from the on-disk
+/// [`SecretStore`] and delegates the HTTP call to [`providers::complete`].
 pub struct RigGateway {
     secrets: SecretStore,
 }
@@ -145,15 +194,50 @@ impl RigGateway {
 }
 
 impl AiGateway for RigGateway {
+    fn providers(&self) -> Result<Vec<ProviderInfo>, AiError> {
+        self.secrets.provider_infos().map_err(AiError::Secrets)
+    }
+
     fn complete<'a>(&'a self, req: &'a AiRequest) -> BoxFuture<'a, Result<String, AiError>> {
         Box::pin(async move {
-            let provider = req.provider.as_str().to_string();
-            let key = self
+            // Exact provider first. The kind fallback covers a request
+            // that names no provider (`provider_id` empty), which is what
+            // the legacy params path produces, and a store migrated from
+            // the old `kind -> key` map (whose records are id'd by kind).
+            let record = self
                 .secrets
-                .get(&provider)
+                .record(&req.provider_id)
                 .map_err(AiError::Secrets)?
-                .ok_or(AiError::MissingKey(provider.clone()))?;
-            providers::complete(&key, req).await
+                .or_else(|| self.secrets.record(req.provider.as_str()).ok().flatten());
+
+            let name = record
+                .as_ref()
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| req.provider.as_str().to_string());
+            let stored_key = record
+                .as_ref()
+                .map(|r| r.api_key.trim().to_string())
+                .unwrap_or_default();
+            let record_url = record
+                .as_ref()
+                .map(|r| r.base_url.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            // The node already merged the blueprint's legacy `base_url`
+            // with the provider's own endpoint (`resolve_target` decides
+            // which one wins). The record is only a fallback for a request
+            // that names no endpoint at all.
+            let mut resolved = req.clone();
+            if resolved.base_url.is_none() {
+                resolved.base_url = record_url;
+            }
+            let key = match (stored_key.is_empty(), resolved.base_url.as_ref()) {
+                (true, Some(_)) => LOCAL_API_KEY.to_string(),
+                // No credential and no endpoint of our own to send it to.
+                (true, None) => return Err(AiError::MissingKey(name)),
+                (false, _) => stored_key,
+            };
+            providers::complete(&key, &resolved).await
         })
     }
 }

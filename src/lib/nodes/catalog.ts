@@ -37,7 +37,12 @@ export type ParamField =
   /** Multi-line text (prompts, system instructions). Rendered as a
    *  `<textarea>` in the Inspector; the node body never shows it inline
    *  because long prompts don't fit on a card. */
-  | { kind: 'textarea'; key: string; label: string; default: string; placeholder?: string; rows?: number };
+  | { kind: 'textarea'; key: string; label: string; default: string; placeholder?: string; rows?: number }
+  /** Model chosen from the global AI provider catalog (toolbar → AI
+   *  Providers). Rendered as a `<select>` of `<optgroup>`s, one per
+   *  configured provider; the stored value is `providerId::model`.
+   *  @see src/lib/utils/ai-config.svelte */
+  | { kind: 'model'; key: string; label: string; default: string };
 
 /**
  * Optional declaration of N synthesised input ports whose count is
@@ -513,8 +518,10 @@ export const NODE_CATALOG: NodeDef[] = [
   },
 
   // ---------- AI ----------
-  // The API key is NOT a node param and never lands in the blueprint:
-  // `Run` reads it from the app's secret store (toolbar → AI Keys).
+  // Providers, their endpoints and their API keys are NOT node params and
+  // never land in a blueprint: they are configured once per machine
+  // (toolbar → AI Providers) and read from the app's secret store at Run.
+  // A node only picks a model from that catalog — see `kind: 'model'`.
   // Shape mirrors the rest of the catalog — scalar prompt in → scalar
   // answer out, array prompt in → parallel array out (one provider call
   // per element, `concurrency` in flight).
@@ -523,7 +530,7 @@ export const NODE_CATALOG: NodeDef[] = [
     category: 'AI',
     label: 'Completion',
     description:
-      'Send a prompt — optionally combined with data — to an external model and emit its reply as text. The `Data` port accepts any value: if the prompt contains `{{data}}` every occurrence is replaced with it, otherwise the data is appended after a blank line. An array of data means one call per element (scalar×array broadcasts, equal-length arrays zip pairwise, different lengths error); wrap an array in `json.stringify` upstream to send it as a single payload. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `provider` selects the wire: `openai` is OpenAI-compatible, so a `Base URL` also covers Groq, OpenRouter and local Ollama / LM Studio endpoints; `anthropic` speaks the Messages API. `Model` left blank falls back to the provider default. The API key comes from the toolbar\'s AI Keys dialog — it is never stored in the blueprint. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
+      'Send a prompt — optionally combined with data — to an external model and emit its reply as text. The `Data` port accepts any value: if the prompt contains `{{data}}` every occurrence is replaced with it, otherwise the data is appended after a blank line. An array of data means one call per element (scalar×array broadcasts, equal-length arrays zip pairwise, different lengths error); wrap an array in `json.stringify` upstream to send it as a single payload. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `Model` picks a provider and a model at once from the toolbar\'s AI Providers dialog (`local-ollama::llama3.1:70b`): each configured provider becomes a group in the dropdown, its Base URL, wire protocol and API key come from that global config, and leaving `Model` blank uses the provider the node can infer — its first model, or the kind default when the provider lists none. Nothing you type here carries a credential, so graphs with AI nodes stay safe to save and share. Blueprints saved before the global catalog keep working: a `provider` (and optional `base_url`) still in a node\'s params selects the provider directly. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
     inputs: [
       { id: 'then_in', name: 'Then', type: T.exec },
       { id: 'prompt', name: 'Prompt', type: T['string-or-array'] },
@@ -536,9 +543,7 @@ export const NODE_CATALOG: NodeDef[] = [
       { id: 'out', name: 'Out', type: T['string-or-array'] },
     ],
     params: [
-      { kind: 'select', key: 'provider', label: 'Provider', default: 'openai', options: ['openai', 'anthropic'] },
-      { kind: 'string', key: 'model', label: 'Model', default: '', placeholder: 'gpt-4o-mini' },
-      { kind: 'string', key: 'base_url', label: 'Base URL (OpenAI-compatible)', default: '', placeholder: 'https://api.openai.com/v1' },
+      { kind: 'model', key: 'model', label: 'Model', default: '' },
       { kind: 'textarea', key: 'prompt', label: 'Prompt (default)', default: '', placeholder: 'Summarize this row as one sentence…', rows: 4 },
       { kind: 'textarea', key: 'system', label: 'System', default: '', placeholder: 'You are a concise data assistant.', rows: 2 },
       { kind: 'number', key: 'temperature', label: 'Temperature', default: 0.2, min: 0, max: 2, step: 0.1 },
