@@ -254,5 +254,7 @@ descarta. La barra de estado informa de cuántos se reconectaron y cuántos se
 perdieron. Los
 `blueprint.input` que ya existían en la selección no se copian: el nodo
 inyectado es el único que se traslada, porque `metadata.inputs` pertenece al
-blueprint nuevo. No hay deshacer: el fichero nuevo queda en disco aunque el
-usuario cierre el editor después.
+blueprint nuevo. El Toolbar ofrece **Undo group** mientras no se cargue o
+cree otro documento: restaura el nivel tal como estaba antes del intercambio
+(nodos, cables y selección) en un único paso, pero no borra el fichero
+creado ni deshace ediciones posteriores a otros nodos.

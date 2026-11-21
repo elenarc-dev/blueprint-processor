@@ -341,7 +341,10 @@ el borde se recorren contra los puertos del nodo: si el extremo externo
 apunta a un puerto con el mismo id, la arista se reconstruye contra el nodo
 Subgraph (`newEdgeId`), con una sola entrada por puerto y conservando el
 fan-out de las salidas; el resto se descarta y se cuenta en la barra de
-estado junto a los reconectados.
+estado junto a los reconectados. Antes del intercambio el Toolbar clona el
+nivel (`groupUndo`) y muestra **Undo group**: restaurar vuelve a poner esos
+arrays en los dos writables y limpia el snapshot; Load y New lo descartan. El
+fichero creado no se borra.
 
 La migración del historial de inputs (`unsaved:<id>` → path) exige además
 que `bpMeta.id` no haya cambiado, para que cambiar de nivel no copie los

@@ -87,6 +87,11 @@
         (selectionCount = list.filter((node) => node.selected).length),
     ),
   );
+  /**
+   * One-step undo of the last **Group as…**: the level as it was before the
+   * swap. Cloned on capture so later drag/selection mutations cannot leak in.
+   */
+  let groupUndo = $state<{ nodes: FlowNode[]; edges: FlowEdge[] } | null>(null);
   /** Global AI providers (endpoints, models, keys) — see AiProvidersDialog. */
   let providersOpen = $state(false);
   /** Global app-level AI tools — see AiToolsDialog. */
@@ -281,6 +286,12 @@
         { json: JSON.stringify(grouped, null, 2), path },
       );
 
+      // Capture before the swap; the grouped file stays on disk either way.
+      groupUndo = {
+        nodes: get(nodes).map((node) => ({ ...node, data: { ...node.data } })),
+        edges: get(edges).map((edge) => ({ ...edge })),
+      };
+
       const center = selected.reduce(
         (acc, node) => ({
           x: acc.x + node.position.x / selected.length,
@@ -384,6 +395,15 @@
     }
   }
 
+  /** Restore the graph replaced by the last **Group as…**. */
+  function handleUndoGroup() {
+    if (!groupUndo) return;
+    nodes.set(groupUndo.nodes);
+    edges.set(groupUndo.edges);
+    groupUndo = null;
+    onAfterIo('Group undone — original nodes and wires restored', 'info');
+  }
+
   /** Token-shaped id for a declared group input (`metadata.inputs` key). */
   function tokenId(value: string): string {
     const id = value
@@ -435,6 +455,7 @@
       // an implicit bookmark that the next Save in-place honors).
       onPathChange(path);
       onResetNesting();
+      groupUndo = null;
       onAfterIo(`Loaded → ${path}`, 'info');
     } catch (err) {
       onAfterIo(`Load failed: ${err}`, 'error');
@@ -461,6 +482,7 @@
     // picker instead of silently overwriting the old file.
     onPathChange(null);
     onResetNesting();
+    groupUndo = null;
     onAfterIo('New blueprint ready', 'info');
   }
 
@@ -506,6 +528,16 @@
   >
     Group as…
   </button>
+  {#if groupUndo}
+    <button
+      class="btn"
+      onclick={handleUndoGroup}
+      disabled={saving}
+      title="Restore the nodes and wires replaced by the last Group as…"
+    >
+      Undo group
+    </button>
+  {/if}
 
   <div class="separator"></div>
 
