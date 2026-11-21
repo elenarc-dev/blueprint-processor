@@ -144,15 +144,21 @@ export function composeBlueprint(
   // sources are fixed per kind so no orphan there. Future
   // `repeatableOutputs` would extend this similarly.
   const targetPortByNode = new Map<string, Set<string>>();
+  const sourcePortByNode = new Map<string, Set<string>>();
   for (const n of bpNodes) {
     targetPortByNode.set(n.id, new Set(n.inputs.map((p) => p.id)));
+    sourcePortByNode.set(n.id, new Set(n.outputs.map((p) => p.id)));
   }
 
+  // Both ends are validated: a subgraph whose embedded blueprint changed
+  // can lose an output port, and a saved wire to a port that no longer
+  // exists is dead weight (the runner would read an output nobody emits).
   const bpEdges: Blueprint['connections'] = edges
     .filter(
       (e) =>
         !!e.sourceHandle &&
         !!e.targetHandle &&
+        sourcePortByNode.get(e.source)?.has((e.sourceHandle ?? '') as string) &&
         targetPortByNode.get(e.target)?.has((e.targetHandle ?? '') as string),
     )
     .map((e) => ({

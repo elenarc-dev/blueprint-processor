@@ -51,14 +51,20 @@
 //! Providers) and reach the node through `AiGateway::providers`; the node
 //! only names a model. See [`resolve_target`] for the exact cascade.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
-use crate::ai::{AiEnv, AiProviderKind, AiRequest, ProviderInfo};
+use crate::ai::{
+    AiEnv, AiProviderKind, AiRequest, ChatMessage, ChatTurn, ProviderInfo, ToolCall, ToolSpec,
+};
+use crate::app_tools::AppTool;
+use crate::executor::nodes::http_request;
+use crate::executor::runner::run_blueprint_path;
 use crate::executor::{single, value_to_string, ExecError, NodeOutputs};
 
 /// Placeholder for the `data` input inside the prompt text.
@@ -111,6 +117,17 @@ async fn run(
 
     let plan = pair_prompt_and_data(&prompt_value, &data_value, &env.node_id)?;
 
+    // Tools come from two places: app-level tools selected by id in
+    // `params.app_tools`, and `ai.tool` descriptors wired into the `tools`
+    // port. Both end up as one list of (schema, runner) pairs.
+    let bound_tools = collect_tools(params, inputs, env)?;
+    let tool_specs: Vec<ToolSpec> = bound_tools.iter().map(|t| t.spec.clone()).collect();
+    let max_rounds = params
+        .get("max_tool_rounds")
+        .and_then(Value::as_u64)
+        .unwrap_or(6)
+        .clamp(1, 16) as usize;
+
     let requests: Vec<AiRequest> = plan
         .items
         .iter()
@@ -130,17 +147,44 @@ async fn run(
 
     // `buffered` (not `buffer_unordered`) keeps the output order aligned
     // with the input order while still allowing `concurrency` in flight.
-    let answers: Vec<String> = stream::iter(requests.into_iter().map(|req| {
-        let gateway = Arc::clone(&env.gateway);
-        async move { gateway.complete(&req).await }
-    }))
-    .buffered(concurrency)
-    .try_collect()
-    .await
-    .map_err(|e| ExecError::Node {
-        node: env.node_id.clone(),
-        message: e.to_string(),
-    })?;
+    // Without tools this is one plain completion per item; with tools each
+    // item runs its own bounded tool-calling conversation.
+    let answers: Vec<String> = if bound_tools.is_empty() {
+        stream::iter(requests.into_iter().map(|req| {
+            let gateway = Arc::clone(&env.gateway);
+            async move { gateway.complete(&req).await }
+        }))
+        .buffered(concurrency)
+        .try_collect()
+        .await
+        .map_err(|e| ExecError::Node {
+            node: env.node_id.clone(),
+            message: e.to_string(),
+        })?
+    } else {
+        let depth = env.depth;
+        let specs = &tool_specs;
+        let tools = &bound_tools;
+        stream::iter(requests.into_iter().map(|req| {
+            let gateway = Arc::clone(&env.gateway);
+            let node_id = env.node_id.clone();
+            async move {
+                run_agentic(
+                    &gateway,
+                    &req,
+                    specs,
+                    tools,
+                    &node_id,
+                    depth,
+                    max_rounds,
+                )
+                .await
+            }
+        }))
+        .buffered(concurrency)
+        .try_collect()
+        .await?
+    };
 
     if plan.mirror {
         Ok(single(
@@ -152,6 +196,260 @@ async fn run(
             "out",
             Value::String(answers.into_iter().next().unwrap_or_default()),
         ))
+    }
+}
+
+/// One tool the node can offer the model: the schema the provider sees
+/// plus how to actually run it.
+struct BoundTool {
+    spec: ToolSpec,
+    runner: ToolRunner,
+}
+
+enum ToolRunner {
+    /// App-level tool: a named HTTP endpoint.
+    Http {
+        method: String,
+        url: String,
+        headers: String,
+    },
+    /// Node tool: a saved blueprint run with the call arguments as inputs.
+    Blueprint { path: String },
+}
+
+fn tool_error(node: &str, message: String) -> ExecError {
+    ExecError::Node {
+        node: node.to_string(),
+        message,
+    }
+}
+
+/// Merge app-level tools (by id) with wired `ai.tool` descriptors.
+///
+/// Duplicate names are an error: the model would not know which one to
+/// call, and "last one wins" is a silent surprise.
+fn collect_tools(
+    params: &Map<String, Value>,
+    inputs: &Map<String, Value>,
+    env: &AiEnv,
+) -> Result<Vec<BoundTool>, ExecError> {
+    let mut out: Vec<BoundTool> = Vec::new();
+
+    let selected: Vec<String> = params
+        .get("app_tools")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !selected.is_empty() {
+        let catalog = env.gateway.tools().map_err(|e| {
+            tool_error(&env.node_id, format!("app tools unavailable: {e}"))
+        })?;
+        for id in selected {
+            let tool = catalog.iter().find(|t| t.id == id).ok_or_else(|| {
+                tool_error(
+                    &env.node_id,
+                    format!("app tool '{id}' is not configured (Toolbar → AI Tools)"),
+                )
+            })?;
+            push_tool(&mut out, bound_app_tool(tool), env)?;
+        }
+    }
+
+    let wired = inputs.get("tools").cloned().unwrap_or(Value::Null);
+    let descriptors = match wired {
+        Value::Null => Vec::new(),
+        Value::Array(items) => items,
+        other => vec![other],
+    };
+    for descriptor in descriptors {
+        if descriptor.is_null() {
+            continue;
+        }
+        let obj = descriptor.as_object().ok_or_else(|| {
+            tool_error(
+                &env.node_id,
+                "the Tools port expects ai.tool descriptors (objects) or an array of them".into(),
+            )
+        })?;
+        let name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(tool_error(
+                &env.node_id,
+                "a wired tool descriptor has no name".into(),
+            ));
+        }
+        let description = obj
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let parameters = obj
+            .get("parameters")
+            .filter(|v| v.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        let path = obj
+            .get("blueprint_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if path.is_empty() {
+            return Err(tool_error(
+                &env.node_id,
+                format!("tool '{name}' has no blueprint_path (use an ai.tool node)"),
+            ));
+        }
+        push_tool(
+            &mut out,
+            BoundTool {
+                spec: ToolSpec {
+                    name,
+                    description,
+                    parameters,
+                },
+                runner: ToolRunner::Blueprint { path },
+            },
+            env,
+        )?;
+    }
+
+    Ok(out)
+}
+
+fn bound_app_tool(tool: &AppTool) -> BoundTool {
+    BoundTool {
+        spec: ToolSpec {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+        },
+        runner: ToolRunner::Http {
+            method: tool.method.clone(),
+            url: tool.url.clone(),
+            headers: tool.headers.clone(),
+        },
+    }
+}
+
+fn push_tool(
+    tools: &mut Vec<BoundTool>,
+    tool: BoundTool,
+    env: &AiEnv,
+) -> Result<(), ExecError> {
+    if tools.iter().any(|t| t.spec.name == tool.spec.name) {
+        return Err(tool_error(
+            &env.node_id,
+            format!("duplicate tool name '{}'", tool.spec.name),
+        ));
+    }
+    tools.push(tool);
+    Ok(())
+}
+
+/// Run one prompt to completion, letting the model call tools in between.
+///
+/// A failing tool does not abort the run: its error is handed back to the
+/// model as that tool's result, which lets it retry with better arguments
+/// or explain the failure in the final answer.
+async fn run_agentic(
+    gateway: &Arc<dyn crate::ai::AiGateway>,
+    req: &AiRequest,
+    specs: &[ToolSpec],
+    tools: &[BoundTool],
+    node: &str,
+    depth: usize,
+    max_rounds: usize,
+) -> Result<String, ExecError> {
+    let mut messages = vec![ChatMessage::User(req.prompt.clone())];
+    for _ in 0..max_rounds {
+        let turn = gateway
+            .complete_turn(req, &messages, specs)
+            .await
+            .map_err(|e| tool_error(node, e.to_string()))?;
+        let ChatTurn { text, tool_calls } = turn;
+        if tool_calls.is_empty() {
+            return Ok(text);
+        }
+        messages.push(ChatMessage::Assistant {
+            text,
+            tool_calls: tool_calls.clone(),
+        });
+        for call in tool_calls {
+            let content = execute_tool(tools, &call, gateway, depth).await;
+            messages.push(ChatMessage::Tool {
+                call_id: call.id,
+                name: call.name,
+                content,
+            });
+        }
+    }
+    Err(tool_error(
+        node,
+        format!(
+            "the model kept requesting tools after {max_rounds} rounds; raise 'Max tool rounds' or simplify the task"
+        ),
+    ))
+}
+
+/// Execute one tool call and return the text the model will see. Errors
+/// are serialized into the result instead of aborting the conversation.
+async fn execute_tool(
+    tools: &[BoundTool],
+    call: &ToolCall,
+    gateway: &Arc<dyn crate::ai::AiGateway>,
+    depth: usize,
+) -> String {
+    let Some(bound) = tools.iter().find(|t| t.spec.name == call.name) else {
+        return json!({ "error": format!("unknown tool '{}'", call.name) }).to_string();
+    };
+    match &bound.runner {
+        ToolRunner::Http {
+            method,
+            url,
+            headers,
+        } => match http_request::perform(
+            method,
+            url,
+            headers,
+            Some(&call.arguments),
+            60_000,
+        )
+        .await
+        {
+            Ok(outcome) => json!({ "status": outcome.status, "body": outcome.text }).to_string(),
+            Err(message) => json!({ "error": message }).to_string(),
+        },
+        ToolRunner::Blueprint { path } => {
+            let args = match &call.arguments {
+                Value::Object(map) => map.clone(),
+                Value::Null => Map::new(),
+                other => {
+                    return json!({ "error": format!(
+                        "tool arguments must be a JSON object, got {}",
+                        crate::executor::value_type_name(other)
+                    ) })
+                    .to_string()
+                }
+            };
+            let external: HashMap<String, Value> = args.into_iter().collect();
+            match run_blueprint_path(path, &external, Arc::clone(gateway), depth + 1).await {
+                Ok(result) => serde_json::to_string(&result.outputs)
+                    .unwrap_or_else(|_| "{}".to_string()),
+                Err(message) => json!({ "error": message }).to_string(),
+            }
+        }
     }
 }
 
@@ -493,6 +791,7 @@ mod tests {
         AiEnv {
             node_id: "ai1".into(),
             gateway,
+            depth: 0,
         }
     }
 
@@ -509,6 +808,103 @@ mod tests {
         m.insert("prompt".into(), prompt);
         m.insert("data".into(), data);
         m
+    }
+
+    /// A blueprint that copies its `x` input to output `value`.
+    fn write_tool_blueprint() -> std::path::PathBuf {
+        let mut path = crate::executor::nodes::test_helpers::unique_tmp("ai-tool");
+        path.set_extension("json");
+        let bp = json!({
+            "schema_version": 1,
+            "id": "tool",
+            "name": "Tool",
+            "description": "",
+            "nodes": [
+                {
+                    "id": "in",
+                    "kind": "blueprint.input",
+                    "position": {"x": 0.0, "y": 0.0},
+                    "params": {},
+                    "inputs": [],
+                    "outputs": []
+                },
+                {
+                    "id": "out",
+                    "kind": "io.output",
+                    "position": {"x": 0.0, "y": 0.0},
+                    "params": {"name": "value"},
+                    "inputs": [
+                        {"id": "then_in", "name": "Then", "type": "exec"},
+                        {"id": "in", "name": "In", "type": "any"}
+                    ],
+                    "outputs": []
+                }
+            ],
+            "connections": [
+                {"id": "e1", "sourceNode": "in", "sourcePort": "x", "targetNode": "out", "targetPort": "in"}
+            ],
+            "metadata": {
+                "tags": [],
+                "inputs": [{"id": "x", "name": "X", "type": "string", "description": ""}]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&bp).unwrap()).unwrap();
+        path
+    }
+
+    /// A wired `ai.tool` descriptor runs its blueprint and the model's
+    /// next turn becomes the node's output.
+    #[test]
+    fn wired_tool_runs_the_subgraph_and_returns_the_final_answer() {
+        let path = write_tool_blueprint();
+        let gateway = Arc::new(MockGateway::new(echo).with_turns(vec![
+            crate::ai::ChatTurn {
+                text: String::new(),
+                tool_calls: vec![crate::ai::ToolCall {
+                    id: "c1".into(),
+                    name: "lookup".into(),
+                    arguments: json!({ "x": "Ada" }),
+                }],
+            },
+            crate::ai::ChatTurn {
+                text: "FINAL".into(),
+                tool_calls: Vec::new(),
+            },
+        ]));
+        let env = env_of(gateway.clone());
+
+        let mut call_inputs = Map::new();
+        call_inputs.insert("prompt".into(), json!("who?"));
+        call_inputs.insert(
+            "tools".into(),
+            json!({
+                "name": "lookup",
+                "description": "look up a row",
+                "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "blueprint_path": path.to_string_lossy().to_string(),
+            }),
+        );
+
+        let outs = call(call_inputs, params(json!({})), &env).unwrap();
+        assert_eq!(outs.get("out").unwrap().as_str(), Some("FINAL"));
+        assert_eq!(gateway.calls().len(), 2, "one turn per model round");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Selecting an app tool that is not configured fails loudly instead
+    /// of silently calling the model without tools.
+    #[test]
+    fn unknown_app_tool_errors() {
+        let gateway = Arc::new(MockGateway::new(echo));
+        let env = env_of(gateway.clone());
+        let err = call(
+            inputs(json!("hi"), Value::Null),
+            params(json!({ "app_tools": ["missing"] })),
+            &env,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not configured"), "{err}");
+        assert!(gateway.calls().is_empty());
     }
 
     #[test]

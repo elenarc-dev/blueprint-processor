@@ -17,11 +17,13 @@
 -->
 <script lang="ts">
   import type { BlueprintMeta, BlueprintInput } from '$lib/types/blueprint';
+  import { invoke } from '@tauri-apps/api/core';
   import {
     aiProviders,
     ensureAiProviders,
     providerName,
   } from '$lib/utils/ai-config.svelte';
+  import { aiTools, ensureAiTools } from '$lib/utils/ai-tools.svelte';
   import {
     getDef,
     NODE_CATALOG,
@@ -47,6 +49,11 @@
   );
 
   let open = $state(true);
+
+  /** Saved blueprints offered by `kind: 'blueprint'` params (subgraph,
+   *  AI tool). Loaded from the same inventory the Dashboard uses; in a
+   *  plain browser build `invoke` rejects and the list stays empty. */
+  let library = $state<Array<{ path: string; name: string }>>([]);
 
   // The set of legal data types a BlueprintInput may carry. Three
   // picker-style kinds (`file`, `folder`, `multi-file`) hint at the
@@ -161,7 +168,17 @@
   // build (no Tauri `invoke`) simply leaves the catalog empty.
   $effect(() => {
     ensureAiProviders();
+    ensureAiTools();
+    void loadLibrary();
   });
+
+  async function loadLibrary() {
+    try {
+      library = await invoke<Array<{ path: string; name: string }>>('inventory_list');
+    } catch {
+      library = [];
+    }
+  }
 
   /** One optgroup per configured provider. */
   const modelGroups = $derived(
@@ -338,6 +355,80 @@
                     <option value={opt}>{opt}</option>
                   {/each}
                 </select>
+              {:else if field.kind === 'blueprint'}
+                {@const current = (d.params[field.key] as string | undefined) ?? ''}
+                <select
+                  value={current}
+                  onchange={(e) =>
+                    onNodeSave(selectedNode.id, {
+                      params: {
+                        ...d.params,
+                        [field.key]: e.currentTarget.value,
+                        subgraphError: undefined,
+                      },
+                      // Force the page to re-derive this node's ports
+                      // from the newly chosen file.
+                      subgraphPath: undefined,
+                    })}
+                >
+                  <option value="">(choose a saved blueprint)</option>
+                  {#each library as item (item.path)}
+                    <option value={item.path}>{item.name || item.path}</option>
+                  {/each}
+                  {#if current && !library.some((i) => i.path === current)}
+                    <option value={current}>{current}</option>
+                  {/if}
+                </select>
+                <input
+                  type="text"
+                  placeholder="/path/to/embedded.blueprint.json"
+                  value={current}
+                  oninput={(e) =>
+                    onNodeSave(selectedNode.id, {
+                      params: { ...d.params, [field.key]: e.currentTarget.value },
+                      subgraphPath: undefined,
+                    })}
+                />
+                {#if library.length === 0}
+                  <p class="field-hint">
+                    No saved blueprints in the library yet — save the
+                    blueprint you want to embed, then reopen this panel.
+                  </p>
+                {/if}
+                {#if typeof d.params.subgraphError === 'string' && d.params.subgraphError}
+                  <p class="field-hint">
+                    Could not read the embedded blueprint: {d.params.subgraphError}
+                  </p>
+                {/if}
+              {:else if field.kind === 'tools'}
+                {@const selected = Array.isArray(d.params[field.key])
+                  ? (d.params[field.key] as string[])
+                  : []}
+                {#if aiTools.value.length === 0}
+                  <p class="field-hint">
+                    No app tools defined yet — Toolbar → AI Tools.
+                  </p>
+                {:else}
+                  <div class="tool-list">
+                    {#each aiTools.value as tool (tool.id)}
+                      <label class="check">
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(tool.id)}
+                          onchange={(e) => {
+                            const next = e.currentTarget.checked
+                              ? [...selected, tool.id]
+                              : selected.filter((id) => id !== tool.id);
+                            onNodeSave(selectedNode.id, {
+                              params: { ...d.params, [field.key]: next },
+                            });
+                          }}
+                        />
+                        <span>{tool.name}</span>
+                      </label>
+                    {/each}
+                  </div>
+                {/if}
               {:else if field.kind === 'model'}
                 {@const current = (d.params[field.key] as string | undefined) ?? ''}
                 {#if modelGroups.length > 0}
@@ -602,6 +693,15 @@
     gap: 6px;
     font-size: 12.5px;
     color: #3f3f46;
+  }
+  .tool-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: white;
+    border: 1px solid #e4e4e7;
+    border-radius: 4px;
+    padding: 6px 8px;
   }
 
   .muted {

@@ -15,6 +15,7 @@
   import type { Blueprint } from '$lib/types/blueprint';
   import { makeMeta, type BlueprintMeta } from '$lib/types/blueprint';
   import AiProvidersDialog from './AiProvidersDialog.svelte';
+  import AiToolsDialog from './AiToolsDialog.svelte';
   import {
     blueprintToFlow,
     composeBlueprint,
@@ -63,6 +64,8 @@
   let loading = $state(false);
   /** Global AI providers (endpoints, models, keys) — see AiProvidersDialog. */
   let providersOpen = $state(false);
+  /** Global app-level AI tools — see AiToolsDialog. */
+  let toolsOpen = $state(false);
 
   async function handleSave() {
     try {
@@ -235,6 +238,13 @@
   </button>
   <button
     class="btn"
+    onclick={() => (toolsOpen = true)}
+    title="Define HTTP tools that AI nodes can call"
+  >
+    AI Tools
+  </button>
+  <button
+    class="btn"
     onclick={onToggleLogs}
     title="Show every log entry of the last run"
   >
@@ -260,6 +270,7 @@
 </header>
 
 <AiProvidersDialog bind:open={providersOpen} />
+<AiToolsDialog bind:open={toolsOpen} />
 
 <style>
   .toolbar {

@@ -338,6 +338,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "image",
+ "reqwest",
  "rig-core",
  "serde",
  "serde_json",

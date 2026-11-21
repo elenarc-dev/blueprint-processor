@@ -146,3 +146,38 @@ usan IA no necesitan implementarlo. Alternativas descartadas:
 dejar los params por nodo duplicados en el diálogo (dos fuentes de verdad
 que se contradicen) y empotrar proveedores predefinidos (OpenAI, Groq,
 Ollama…) en el backend, que obligaría a una release por proveedor nuevo.
+
+## ADR-006 — Ejecución anidada con profundidad explícita y tool-calling por JSON directo
+
+**Contexto.** Los subgrafos (FD-003) y las tools de grafo (FD-004) hacen que
+un nodo async tenga que ejecutar otro grafo desde dentro del runner. Además,
+el bucle de tools necesita ver `tool_calls` y reenviar mensajes assistant /
+tool en el turno siguiente, algo que el helper de completion de `rig-core`
+(0.46, pre-1.0) no expone.
+
+**Decisión.**
+
+- `runner::run_graph_with_depth(bp, inputs, gateway, depth)` es el núcleo;
+  `run_graph_with` es el envoltorio con `depth = 0`. La profundidad viaja en
+  `AiEnv.depth` y `run_blueprint_path` la valida contra `MAX_DEPTH = 8`
+  antes de leer el fichero. La recursión es finita porque el futuro async
+  se boxea en cada nivel.
+- El contrato async `AsyncNodeExec` no cambia: los ejecutores reciben
+  `&AiEnv`, que ya lleva el gateway (los grafos anidados comparten
+  proveedores y claves) y ahora también la profundidad.
+- El tool-calling se implementa en `ai/providers.rs` con peticiones JSON
+  directas (`reqwest`, misma versión que `rig-core`) para OpenAI Chat
+  Completions y Anthropic Messages. El texto sigue pasando por rig; solo el
+  camino con tools habla el wire a mano.
+- `AiGateway` gana `tools()` (catálogo de app tools, default vacío) y
+  `complete_turn()` (con default que aplana el último mensaje de usuario a
+  `complete()`). Así los gateways y tests que no usan tools siguen
+  compilando y funcionando, y `RigGateway` es el único que implementa el
+  bucle real.
+
+**Consecuencias.** Un fallo dentro de un subgrafo se reporta con el mensaje
+del runner anidado y la ruta; los logs de los grafos internos no se
+aplastan en el run padre (no hay prefijo de node_id). El límite de 8 niveles
+acota también el coste de una cadena de tools que se llaman entre sí. Si
+`rig-core` gana una API de tools estable, el wire manual de `providers.rs`
+es el único sitio a sustituir.

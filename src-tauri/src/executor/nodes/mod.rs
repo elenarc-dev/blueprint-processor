@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use crate::executor::{AsyncNodeExec, NodeExec};
 
 pub mod ai_completion;
+pub mod ai_tool;
 pub mod array_create;
 pub mod array_filter;
 pub mod array_get_field;
@@ -18,12 +19,14 @@ pub mod array_push;
 pub mod array_set_field;
 pub mod array_sum;
 pub mod blueprint_input;
+pub mod blueprint_subgraph;
 pub mod file_delete;
 pub mod file_iterate_folder;
 pub mod file_path_picker;
 pub mod file_read;
 pub mod file_save_binary;
 pub mod file_write;
+pub mod http_request;
 pub mod image_format;
 pub mod io_input;
 pub mod io_logger;
@@ -103,6 +106,9 @@ pub fn setup_registry() -> HashMap<String, NodeExec> {
     // against the old kind still load and execute.
     r.insert("blueprint.input".into(), blueprint_input::exec as NodeExec);
 
+    // AI tool descriptor (consumed by `ai.completion`'s `tools` port).
+    r.insert("ai.tool".into(), ai_tool::exec as NodeExec);
+
     // JSON
     r.insert("json.parse".into(), json_parse::exec as NodeExec);
     r.insert("json.stringify".into(), json_stringify::exec as NodeExec);
@@ -122,6 +128,11 @@ pub fn setup_async_registry() -> HashMap<String, AsyncNodeExec> {
 
     // AI
     r.insert("ai.completion".into(), ai_completion::exec as AsyncNodeExec);
+    r.insert("blueprint.subgraph".into(), blueprint_subgraph::exec as AsyncNodeExec);
+
+    // HTTP. Network I/O belongs on the async path even though it shares
+    // nothing else with the AI nodes.
+    r.insert("http.request".into(), http_request::exec as AsyncNodeExec);
 
     r
 }

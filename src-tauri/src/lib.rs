@@ -7,6 +7,7 @@
 //   * Track an inventory of saved blueprints for the Dashboard.
 
 mod ai;
+mod app_tools;
 mod blueprint;
 mod executor;
 mod inventory;
@@ -17,6 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ai::{AiGateway, ProviderDraft, ProviderStatus, RigGateway, SecretStore};
+use app_tools::AppTool;
 use blueprint::{Blueprint, SCHEMA_VERSION};
 use executor::{run_graph_with, ExecError, RunOutcome};
 use inventory::InventoryEntry;
@@ -196,6 +198,41 @@ fn ai_clear_provider_key(
 }
 
 // ---------------------------------------------------------------------
+// App-level AI tools — back the toolbar's "AI Tools" dialog.
+//
+// A tool is a named HTTP endpoint the `ai.completion` node can offer to
+// the model. Definitions are global (app data dir), never blueprint
+// content, so a shared graph carries only the ids it selected.
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+fn tools_list(app: tauri::AppHandle) -> Result<Vec<AppTool>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+    app_tools::list(&dir)
+}
+
+#[tauri::command]
+fn tools_save(app: tauri::AppHandle, tool: AppTool) -> Result<Vec<AppTool>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+    app_tools::save(&dir, tool)
+}
+
+#[tauri::command]
+fn tools_remove(app: tauri::AppHandle, id: String) -> Result<Vec<AppTool>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+    app_tools::remove(&dir, &id)
+}
+
+// ---------------------------------------------------------------------
 // Inventory commands — back the Dashboard route at `/dashboard`.
 // ---------------------------------------------------------------------
 
@@ -330,6 +367,9 @@ pub fn run() {
             ai_save_provider,
             ai_remove_provider,
             ai_clear_provider_key,
+            tools_list,
+            tools_save,
+            tools_remove,
             inventory_list,
             inventory_add,
             inventory_remove,

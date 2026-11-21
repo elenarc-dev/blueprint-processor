@@ -17,7 +17,8 @@ Todo el código backend vive en `src-tauri/src/`. Las dependencias Cargo están 
 | `ai/mod.rs` | ~240 | Capa de IA: `AiProviderKind`, `AiRequest`, `AiError`, `AiGateway` (trait dyn-safe), `AiEnv`, `ProviderInfo`, `RigGateway`, `UnconfiguredGateway`. |
 | `ai/providers.rs` | ~220 | ÚNICO fichero que conoce `rig-core`. Traduce a OpenAI Chat Completions (con `base_url`) y Anthropic Messages; reintentos acotados. |
 | `ai/secrets.rs` | ~700 | `SecretStore`: catálogo global de proveedores (`id`, `kind`, `label`, `base_url`, `models`) y sus claves en `<app_data_dir>/secrets.json`, con migración del formato legacy, escritura atómica y `0600` en Unix. |
-| `ai/mock.rs` | ~55 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas, incluido `with_providers()` para poblar el catálogo. |
+| `ai/mock.rs` | ~55 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas, incluido `with_providers()` / `with_tools()` para poblar catálogos y `with_turns()` para guionizar un bucle de tools. |
+| `app_tools.rs` | ~350 | Catálogo global de herramientas de IA en `<app_data_dir>/tools.json` (nombre, descripción, JSON Schema, método, URL, cabeceras). CRUD bajo mutex, saneado de nombres, escritura atómica y `0600` en Unix. |
 
 ## `main.rs`
 
@@ -62,6 +63,9 @@ La impl de `Serialize` para `BlueprintError` (y la equivalente para `ExecError` 
 | `ai_save_provider(draft)` | `ProviderDraft` (`id`, `kind`, `label`, `baseUrl`, `models`, `apiKey`): `id` vacío lo genera el almacén a partir del kind (`openai`, `openai-2`, …); `apiKey` vacío mantiene la clave ya guardada | `Vec<ProviderStatus>` | Mismo set. |
 | `ai_remove_provider(id)` | id del proveedor | `Vec<ProviderStatus>` | Mismo set. |
 | `ai_clear_provider_key(id)` | id del proveedor | `Vec<ProviderStatus>` | Mismo set. |
+| `tools_list()` | ninguno | `Vec<AppTool>` (`id`, `name`, `description`, `parameters`, `method`, `url`, `headers`) | Mismo set. |
+| `tools_save(tool)` | `AppTool` completo; `id` vacío lo genera el almacén a partir del nombre | `Vec<AppTool>` | Mismo set. |
+| `tools_remove(id)` | id de la tool | `Vec<AppTool>` | Mismo set. |
 
 Los cuatro responden la lista de proveedores resultante, así el diálogo se
 refresca en un único round-trip. Los DTO que cruzan el IPC van en
@@ -380,12 +384,44 @@ Cada entrada abajo es el mapeo kind → fichero más el contrato del ejecutor (u
 | `io.output` | `io_output.rs` | Escribe `inputs["in"]` (o `null`) en `ctx.outputs[params.name]`. Emite `empty_outputs()`. |
 | `io.logger` | `io_logger.rs` | Empuja `LogEntry { node_id, label: params.label, value: inputs["in"] }` a `ctx.logs`. Emite `empty_outputs()`. |
 
+### Nodos compuestos, HTTP y tools
+
+| Kind | Fichero | Contrato |
+|------|---------|----------|
+| `http.request` | `http_request.rs` | Async (registro async). `perform()` es compartido con las app tools. Emite `then_out: null`, `status: number`, `body: string` y `json: Value` (parseado o `null`). Un status no-2xx es dato; solo fallan los errores de transporte. |
+| `blueprint.subgraph` | `blueprint_subgraph.rs` | Async. Lee `params.path`, pasa los puertos no-`exec` no nulos como `external_inputs` del blueprint embebido y devuelve sus outputs + `then_out: null`. Usa `runner::run_blueprint_path`. |
+| `ai.tool` | `ai_tool.rs` | Síncrono, sin inputs. Emite `tool: { name, description, parameters, blueprint_path }`; `name` vacío se deriva del nombre del fichero. Consumido por el puerto `tools` de `ai.completion`. |
+
+**Anidamiento.** `runner::run_graph_with_depth` arrastra una profundidad
+que viaja en `AiEnv.depth`; `run_blueprint_path` la comprueba contra
+`MAX_DEPTH = 8` antes de leer el fichero. Un ciclo indirecto termina con
+un error legible en vez de desbordar la pila.
+
+**Tools en `ai.completion`.** El nodo combina `params.app_tools` (ids
+resueltos vía `AiGateway::tools()`) con los descriptores cableados en el
+puerto `tools`. Con tools usa `AiGateway::complete_turn` (JSON directo en
+`providers.rs` para OpenAI-compatible y Anthropic) y ejecuta cada llamada:
+las app tools hacen HTTP con `http_request::perform`; las de nodo corren su
+blueprint con los argumentos como inputs externos. Sin tools, el camino es
+exactamente el de antes (`AiGateway::complete`).
+
 ### Añadir un nodo — resumen (véase [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md) para la receta completa)
 
 1. Crea `src-tauri/src/executor/nodes/<kind_snake>.rs` con `pub fn exec(...)` + uno o dos `#[cfg(test)]` casos usando `ctx_with`.
 2. Añade `pub mod <kind_snake>;` en `nodes/mod.rs` y una línea en `setup_registry`.
 3. Añade una entrada NodeDef a `NODE_CATALOG` en `src/lib/nodes/catalog.ts`.
 4. (Opcional) Añade edición inline en `BlueprintNode.svelte` para nuevos `ParamField` kinds — normalmente no hace falta (`number` / `string` / `boolean` / `select` cubren las necesidades de hoy).
+
+## `app_tools.rs` — catálogo global de tools
+
+Una *app tool* es un endpoint HTTP con nombre y JSON Schema que el modelo
+puede llamar. Se define una vez en la toolbar (**AI Tools**) y vive en
+`<app_data_dir>/tools.json`; el blueprint solo guarda los ids elegidos en
+`params.app_tools`. Mismas reglas que los proveedores (ADR-003): nada de
+configuración de máquina dentro de un grafo compartido. Los nombres se
+sanean a `[A-Za-z0-9_-]` porque OpenAI y Anthropic los usan como nombre de
+función. El fichero se escribe con permisos `0600` en Unix porque
+`headers` puede contener un token.
 
 ## `ai/` — proveedores externos
 

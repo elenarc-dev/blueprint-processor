@@ -51,6 +51,31 @@ pub async fn run_graph_with(
     external_inputs: &HashMap<String, Value>,
     gateway: Arc<dyn AiGateway>,
 ) -> Result<RunResult, RunFailure> {
+    run_graph_with_depth(bp, external_inputs, gateway, 0).await
+}
+
+/// Deepest nesting of embedded blueprints (`blueprint.subgraph` and
+/// subgraph-backed AI tools) allowed in one run. Bounds an indirect cycle
+/// (A embeds B embeds A) to a readable error instead of a stack overflow.
+pub const MAX_DEPTH: usize = 8;
+
+/// [`run_graph_with`] plus the current nesting depth. Nested runs share the
+/// same gateway, so an embedded blueprint's `ai.*` nodes reach the same
+/// providers as the root graph.
+pub async fn run_graph_with_depth(
+    bp: &Blueprint,
+    external_inputs: &HashMap<String, Value>,
+    gateway: Arc<dyn AiGateway>,
+    depth: usize,
+) -> Result<RunResult, RunFailure> {
+    if depth > MAX_DEPTH {
+        return Err(RunFailure::from(ExecError::Node {
+            node: bp.name.clone(),
+            message: format!(
+                "subgraph nesting exceeds {MAX_DEPTH} levels — does a blueprint embed itself?"
+            ),
+        }));
+    }
     let started = std::time::Instant::now();
     let registry = nodes::setup_registry();
     let async_registry = nodes::setup_async_registry();
@@ -67,8 +92,32 @@ pub async fn run_graph_with(
         &effective,
         &gateway,
         started,
+        depth,
     )
     .await
+}
+
+/// Load a blueprint file and run it as a nested graph. Used by
+/// `blueprint.subgraph` and by subgraph-backed AI tools; the depth is
+/// enforced here as well so a caller cannot bypass the limit.
+pub async fn run_blueprint_path(
+    path: &str,
+    inputs: &HashMap<String, Value>,
+    gateway: Arc<dyn AiGateway>,
+    depth: usize,
+) -> Result<RunResult, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!(
+            "subgraph nesting exceeds {MAX_DEPTH} levels — is a blueprint embedding itself?"
+        ));
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read embedded blueprint {path}: {e}"))?;
+    let bp: Blueprint = serde_json::from_str(&raw)
+        .map_err(|e| format!("invalid embedded blueprint {path}: {e}"))?;
+    run_graph_with_depth(&bp, inputs, gateway, depth)
+        .await
+        .map_err(|f| f.error.to_string())
 }
 
 /// For each declared `BlueprintInput` without a value in `effective`,
@@ -270,6 +319,7 @@ async fn execute(
     external_inputs: &HashMap<String, Value>,
     gateway: &Arc<dyn AiGateway>,
     started: std::time::Instant,
+    depth: usize,
 ) -> Result<RunResult, RunFailure> {
     let mut outputs_produced: HashMap<(String, String), Value> = HashMap::new();
     let mut final_outputs: HashMap<String, Value> = HashMap::new();
@@ -366,6 +416,7 @@ async fn execute(
             let env = AiEnv {
                 node_id: node_id.clone(),
                 gateway: Arc::clone(gateway),
+                depth,
             };
             let outs = match run_async(&owned_inputs, &params, &env).await {
                 Ok(outs) => outs,

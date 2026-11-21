@@ -161,6 +161,13 @@ impl SecretStore {
         Self { dir: dir.into() }
     }
 
+    /// Directory holding `secrets.json`. The app-tool store lives in the
+    /// same directory, which is how the gateway reaches it without a
+    /// second path being threaded through every call.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Absolute path of the store file (used by the permission test and
     /// handy when a future diagnostics panel needs to print it).
     #[allow(dead_code)]

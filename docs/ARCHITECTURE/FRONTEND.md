@@ -22,10 +22,13 @@ El frontend es una app SvelteKit + Svelte 5 + TypeScript. El runtime es una úni
 | `src/lib/components/Editor.svelte` | 236 | El canvas. Envuelve `<SvelteFlow>`, dueño del drag/drop y de `isValidConnection`. |
 | `src/lib/components/nodes/BlueprintNode.svelte` | 378 | Renderer por nodo. Un único componente para todos los kinds; renderiza header, body, handles y un editor inline de params + botón delete. |
 | `src/lib/components/nodes/index.ts` | 12 | El map `nodeTypes` que consume Svelte Flow (hoy sólo `{ default: BlueprintNode }`). |
-| `src/lib/components/Inspector.svelte` | 788 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). Renderiza `number` / `string` / `textarea` / `boolean` / `select` / `model`. |
+| `src/lib/components/Inspector.svelte` | 788 | Panel derecho. Modo dual: editor de metadata (sin selección), o editor de params de nodo (nodo seleccionado). Renderiza `number` / `string` / `textarea` / `boolean` / `select` / `model` / `blueprint` / `tools`. |
 | `src/lib/components/ResultsPanel.svelte` | 240 | Panel inferior. Renderiza `RunResult.outputs`, `RunResult.logs`, y un botón Run. |
 | `src/lib/components/AiProvidersDialog.svelte` | ~510 | Diálogo CRUD de proveedores IA (botón **AI Providers** en la toolbar). Llama a `ai_providers` / `ai_save_provider` / `ai_remove_provider` / `ai_clear_provider_key`. **Única** vía de entrada de una clave. |
 | `src/lib/utils/ai-config.svelte.ts` | ~90 | Espejo reactivo del catálogo global de proveedores (`aiProviders`, `ProviderStatus`, `ProviderDraft`, `refreshAiProviders`, `ensureAiProviders`, `setAiProviders`). Lo comparten el diálogo y el `<select>` de modelo del Inspector. |
+| `src/lib/utils/ai-tools.svelte.ts` | ~55 | Espejo reactivo del catálogo global de app tools (`aiTools`, `AppTool`, `refreshAiTools`, `ensureAiTools`, `setAiTools`). |
+| `src/lib/utils/subgraphs.svelte.ts` | ~110 | Caché path → definición de blueprint embebido (`ensureSubgraph`, `portsForBlueprint`). Un error de lectura se cachea como def con solo puertos `exec` + `error`. |
+| `src/lib/components/AiToolsDialog.svelte` | ~300 | Diálogo CRUD de app tools (botón **AI Tools**). Llama a `tools_list` / `tools_save` / `tools_remove`. |
 
 ## Build / configs de runtime
 
@@ -164,7 +167,9 @@ export type ParamField =
   | { kind: 'boolean'; key: string; label: string; default: boolean; }
   | { kind: 'select';  key: string; label: string; default: string;  options: string[] }
   | { kind: 'textarea'; key: string; label: string; default: string; placeholder?, rows? }
-  | { kind: 'model';   key: string; label: string; default: string };  // ver abajo
+  | { kind: 'model';   key: string; label: string; default: string }   // ver abajo
+  | { kind: 'blueprint'; key: string; label: string }   // path de un blueprint guardado
+  | { kind: 'tools';   key: string; label: string };     // ids de app tools
 
 export interface NodeDef {
   kind: string;
@@ -182,6 +187,11 @@ instructions): el cuerpo del nodo nunca lo muestra porque un prompt largo no
 cabe en una tarjeta. `model` tampoco: se renderiza como `<select>` de
 `<optgroup>` (una por proveedor configurado) y el valor guardado en
 `params.model` es `providerId::model` — ver *AI providers* abajo.
+`blueprint` es un `<select>` de la librería (`inventory_list`) más una ruta
+textual para casos fuera de ella; al cambiar el path, el nodo resetea
+`subgraphPath` para que la página re-derive sus puertos. `tools` es una
+checklist de app tools que guarda un array de ids en `params[<key>]`.
+`defaultParams` trata los dos tipos nuevos como `''` y `[]` respectivamente.
 
 ### Helpers exportados
 
@@ -262,6 +272,25 @@ cada uno invoque el backend por su cuenta.
 
 El `<select>` del Inspector construye un `<optgroup>` por proveedor y guarda
 `providerId::model` (ver `kind: 'model'` en *catalog.ts*).
+
+## `src/lib/utils/ai-tools.svelte.ts`
+
+Espejo del catálogo global de app tools (`src-tauri/src/app_tools.rs`) con
+el mismo patrón que `ai-config.svelte.ts`: un `$state` exportado que leen el
+diálogo y el Inspector. `invoke('tools_list')` fuera de Tauri deja la lista
+vacía, que es el estado "nada configurado".
+
+## `src/lib/utils/subgraphs.svelte.ts`
+
+Un nodo `blueprint.subgraph` guarda solo el path del blueprint que incrusta;
+sus puertos pertenecen a ese fichero. `ensureSubgraph(path)` lo carga una
+vez (deduplicando llamadas concurrentes) y `portsForBlueprint` los deriva:
+`metadata.inputs` como entradas (además del `then_in` exec) y un output por
+cada nodo `io.output`, con `params.name` como id. `+page.svelte` tiene un
+`$effect` que aplica la definición al nodo (`inputs`, `outputs`, label) y
+descarta edges que apuntaban a puertos desaparecidos; `data.subgraphPath`
+recuerda a qué path corresponden los puertos actuales para que el efecto se
+estabilice. Un fallo de lectura se cachea y se muestra en el Inspector.
 
 ## `src/lib/components/Toolbar.svelte`
 

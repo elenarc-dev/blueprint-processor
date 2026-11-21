@@ -39,6 +39,7 @@
   import LogsPanel from '$lib/components/LogsPanel.svelte';
   import { blueprintToFlow } from '$lib/utils/blueprint-io';
   import { blueprintInputs } from '$lib/utils/blueprint-context.svelte';
+  import { ensureSubgraph } from '$lib/utils/subgraphs.svelte';
   import {
     loadInputHistory,
     saveInputHistory,
@@ -97,6 +98,55 @@
   $effect(() => {
     blueprintInputs.value = bpMeta.metadata.inputs;
   });
+
+  // Keep every `blueprint.subgraph` node's ports in sync with the file it
+  // embeds. The node stores only a path; when that path has not been
+  // resolved yet we load the blueprint once, replace the node's port set
+  // and label, and drop any wire that pointed at a port which no longer
+  // exists. `subgraphPath` records which path the current ports belong to
+  // so the effect settles instead of reloading on every keystroke.
+  $effect(() => {
+    void syncSubgraphs(flowNodes);
+  });
+
+  async function syncSubgraphs(list: FlowNode[]) {
+    for (const node of list) {
+      const data = node.data as NodeData;
+      if (data.kind !== 'blueprint.subgraph') continue;
+      const path = String(data.params?.path ?? '').trim();
+      if (!path || data.subgraphPath === path) continue;
+
+      const def = await ensureSubgraph(path);
+      nodes.update((arr: FlowNode[]) =>
+        arr.map((n) =>
+          n.id === node.id
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  label: def.name || n.data.label,
+                  inputs: def.inputs,
+                  outputs: def.outputs,
+                  subgraphPath: path,
+                  params: { ...n.data.params, subgraphError: def.error },
+                },
+              }
+            : n,
+        ),
+      );
+      edges.update((prev: FlowEdge[]) =>
+        prev.filter((e) => {
+          if (e.source === node.id && !def.outputs.some((p) => p.id === e.sourceHandle)) {
+            return false;
+          }
+          if (e.target === node.id && !def.inputs.some((p) => p.id === e.targetHandle)) {
+            return false;
+          }
+          return true;
+        }),
+      );
+    }
+  }
 
   // Drop orphan edges whose source is a Blueprint Input node and the
   // sourceHandle no longer matches any declared meta.input id. Runs on

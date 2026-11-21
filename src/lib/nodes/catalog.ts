@@ -42,7 +42,13 @@ export type ParamField =
    *  Providers). Rendered as a `<select>` of `<optgroup>`s, one per
    *  configured provider; the stored value is `providerId::model`.
    *  @see src/lib/utils/ai-config.svelte */
-  | { kind: 'model'; key: string; label: string; default: string };
+  | { kind: 'model'; key: string; label: string; default: string }
+  /** Saved blueprint picked from the library. Stores the absolute path;
+   *  the page derives the node's ports from that file. */
+  | { kind: 'blueprint'; key: string; label: string }
+  /** Multi-select of app-level AI tools (toolbar → AI Tools). Stores an
+   *  array of tool ids in `params[<key>]`. */
+  | { kind: 'tools'; key: string; label: string };
 
 /**
  * Optional declaration of N synthesised input ports whose count is
@@ -479,6 +485,29 @@ export const NODE_CATALOG: NodeDef[] = [
   },
 
   {
+    kind: 'http.request',
+    category: 'IO',
+    label: 'HTTP Request',
+    description: 'Call an HTTP endpoint and emit its response. `status` carries the HTTP code (4xx/5xx are data, not node failures), `body` the raw text and `json` the parsed payload (null when the response is not JSON). Leave `Body` unwired for GET/DELETE; for other methods connect any value and it is sent as JSON, or connect a string to send it verbatim. Headers are one `Name: Value` per line. Connection errors (bad URL, DNS, TLS, timeout) fail the node — there is no status to report.',
+    inputs: [
+      { id: 'then_in', name: 'Then', type: T.exec },
+      { id: 'url', name: 'URL', type: T.string },
+      { id: 'body', name: 'Body', type: T.any },
+    ],
+    outputs: [
+      { id: 'then_out', name: 'Then', type: T.exec },
+      { id: 'status', name: 'Status', type: T.number },
+      { id: 'body', name: 'Body', type: T.string },
+      { id: 'json', name: 'JSON', type: T.any },
+    ],
+    params: [
+      { kind: 'select', key: 'method', label: 'Method', default: 'GET', options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'] },
+      { kind: 'string', key: 'url', label: 'URL', default: '', placeholder: 'https://api.example.com/items' },
+      { kind: 'textarea', key: 'headers', label: 'Headers (one per line)', default: '', placeholder: 'Authorization: Bearer …', rows: 2 },
+      { kind: 'number', key: 'timeout_ms', label: 'Timeout (ms)', default: 30000, min: 100, max: 600000, step: 100 },
+    ],
+  },
+  {
     kind: "file.iterate",
     category: 'IO',
     label: 'Get Files in folder',
@@ -517,6 +546,22 @@ export const NODE_CATALOG: NodeDef[] = [
     ],
   },
 
+  // `blueprint.subgraph` — embed another saved blueprint as one node.
+  //
+  // The catalog entry is just the seed: the ports below are replaced at
+  // edit time from the embedded blueprint (`metadata.inputs` plus its
+  // `io.output` names). A subgraph therefore looks and wires exactly like
+  // a built-in node while still running as its own graph.
+  {
+    kind: 'blueprint.subgraph',
+    category: 'IO',
+    label: 'Subgraph',
+    description: 'Embed a saved blueprint as a single node. Pick the file in the Inspector and the node grows the blueprint\'s declared inputs plus one output per `Output` node (named after it). Running the graph runs that blueprint with the wired values as its external inputs — nesting is allowed up to 8 levels, and an embedded blueprint\'s AI/HTTP nodes keep working. The blueprint is loaded from its path at run time, so edits to the embedded file are picked up without re-saving this graph.',
+    inputs: [{ id: 'then_in', name: 'Then', type: T.exec }],
+    outputs: [{ id: 'then_out', name: 'Then', type: T.exec }],
+    params: [{ kind: 'blueprint', key: 'path', label: 'Embedded blueprint' }],
+  },
+
   // ---------- AI ----------
   // Providers, their endpoints and their API keys are NOT node params and
   // never land in a blueprint: they are configured once per machine
@@ -530,13 +575,17 @@ export const NODE_CATALOG: NodeDef[] = [
     category: 'AI',
     label: 'Completion',
     description:
-      'Send a prompt — optionally combined with data — to an external model and emit its reply as text. The `Data` port accepts any value: if the prompt contains `{{data}}` every occurrence is replaced with it, otherwise the data is appended after a blank line. An array of data means one call per element (scalar×array broadcasts, equal-length arrays zip pairwise, different lengths error); wrap an array in `json.stringify` upstream to send it as a single payload. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `Model` picks a provider and a model at once from the toolbar\'s AI Providers dialog (`local-ollama::llama3.1:70b`): each configured provider becomes a group in the dropdown, its Base URL, wire protocol and API key come from that global config, and leaving `Model` blank uses the provider the node can infer — its first model, or the kind default when the provider lists none. Nothing you type here carries a credential, so graphs with AI nodes stay safe to save and share. Blueprints saved before the global catalog keep working: a `provider` (and optional `base_url`) still in a node\'s params selects the provider directly. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting.',
+      'Send a prompt — optionally combined with data — to an external model and emit its reply as text. The `Data` port accepts any value: if the prompt contains `{{data}}` every occurrence is replaced with it, otherwise the data is appended after a blank line. An array of data means one call per element (scalar×array broadcasts, equal-length arrays zip pairwise, different lengths error); wrap an array in `json.stringify` upstream to send it as a single payload. Wire a string for a single call, or an array for one call per element (the output array always matches the input length and order; `concurrency` caps how many are in flight). `Model` picks a provider and a model at once from the toolbar\'s AI Providers dialog (`local-ollama::llama3.1:70b`): each configured provider becomes a group in the dropdown, its Base URL, wire protocol and API key come from that global config, and leaving `Model` blank uses the provider the node can infer — its first model, or the kind default when the provider lists none. Nothing you type here carries a credential, so graphs with AI nodes stay safe to save and share. Blueprints saved before the global catalog keep working: a `provider` (and optional `base_url`) still in a node\'s params selects the provider directly. `Prompt` (port) wins over `Prompt (default)` (param), matching the rest of the app. Temperature and max tokens are best-effort: a provider that rejects either reports the error verbatim instead of silently dropping the setting. Tools: select app-level tools in the Inspector, and/or wire `ai.tool` nodes into the `Tools` port. With tools the node runs a bounded tool-calling loop (the model asks, the node executes, the result goes back) and emits the model\'s final text; a failing tool is reported to the model instead of aborting the run.',
     inputs: [
       { id: 'then_in', name: 'Then', type: T.exec },
       { id: 'prompt', name: 'Prompt', type: T['string-or-array'] },
       // Payload from upstream. `any` so it accepts strings, numbers,
       // arrays and objects (an object is serialized as JSON text).
       { id: 'data', name: 'Data', type: T.any },
+      // Tool descriptors. Wire one `ai.tool` node, or bundle several
+      // through `array.create`; app-level tools are selected in the
+      // Inspector instead (they are global config, not graph content).
+      { id: 'tools', name: 'Tools', type: T.any },
     ],
     outputs: [
       { id: 'then_out', name: 'Then', type: T.exec },
@@ -549,6 +598,35 @@ export const NODE_CATALOG: NodeDef[] = [
       { kind: 'number', key: 'temperature', label: 'Temperature', default: 0.2, min: 0, max: 2, step: 0.1 },
       { kind: 'number', key: 'max_tokens', label: 'Max tokens', default: 512, min: 1, max: 32768, step: 1 },
       { kind: 'number', key: 'concurrency', label: 'Concurrency (arrays)', default: 4, min: 1, max: 16, step: 1 },
+      // App-level tools are chosen by id; the definitions stay global
+      // (toolbar → AI Tools) so the blueprint never carries an endpoint.
+      { kind: 'tools', key: 'app_tools', label: 'App tools' },
+      { kind: 'number', key: 'max_tool_rounds', label: 'Max tool rounds', default: 6, min: 1, max: 16, step: 1 },
+    ],
+  },
+
+  // `ai.tool` — expose one saved blueprint to an AI node as a callable
+  // tool. Unlike app-level tools, this one lives in the graph itself: the
+  // descriptor carries the blueprint path, and the AI node runs it with
+  // the tool-call arguments as external inputs.
+  {
+    kind: 'ai.tool',
+    category: 'AI',
+    label: 'Tool (Subgraph)',
+    description: 'Offer a saved blueprint to an AI node as a tool. Wire `Tool` into an `ai.completion` node\'s `Tools` port; bundle several tool nodes through `array.create` when the model should choose between them. `Parameters` is the JSON Schema the model sees for the arguments — each argument becomes an external input of the embedded blueprint by the same name, and the blueprint\'s `Output` values are returned to the model as JSON. Leave `Tool name` blank to derive it from the file name.',
+    inputs: [],
+    outputs: [{ id: 'tool', name: 'Tool', type: T.any }],
+    params: [
+      { kind: 'blueprint', key: 'path', label: 'Tool blueprint' },
+      { kind: 'string', key: 'name', label: 'Tool name', default: '', placeholder: 'find_customer' },
+      { kind: 'textarea', key: 'description', label: 'Description', default: '', placeholder: 'Look up a customer by email…', rows: 2 },
+      {
+        kind: 'textarea',
+        key: 'parameters',
+        label: 'Parameters (JSON Schema)',
+        default: '{"type":"object","properties":{}}',
+        rows: 3,
+      },
     ],
   },
 
@@ -599,7 +677,10 @@ export function getDef(kind: string): NodeDef | undefined {
 export function defaultParams(def: NodeDef): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const p of def.params) {
-    out[p.key] = p.default;
+    // `blueprint` and `tools` have no scalar default: a path starts empty
+    // and a tool selection starts as an empty id list.
+    if ('default' in p) out[p.key] = p.default;
+    else out[p.key] = p.kind === 'tools' ? [] : '';
   }
   return out;
 }

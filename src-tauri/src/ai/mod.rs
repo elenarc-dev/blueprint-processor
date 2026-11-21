@@ -26,7 +26,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde_json::Value;
 use thiserror::Error;
+
+use crate::app_tools::AppTool;
 
 pub mod providers;
 pub mod secrets;
@@ -106,6 +109,49 @@ pub struct ProviderInfo {
     pub has_key: bool,
 }
 
+/// One callable exposed to the model during a tool-aware turn.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema object describing the arguments.
+    pub parameters: Value,
+}
+
+/// One tool invocation requested by the model.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// Provider-assigned id, echoed back with the result.
+    pub id: String,
+    pub name: String,
+    /// Parsed arguments. A provider that returns a non-JSON string lands
+    /// here as `Value::String` so the tool executor can report it.
+    pub arguments: Value,
+}
+
+/// One message in a tool-aware conversation.
+#[derive(Debug, Clone)]
+pub enum ChatMessage {
+    User(String),
+    Assistant {
+        text: String,
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool {
+        call_id: String,
+        name: String,
+        /// Tool result, already serialized to text.
+        content: String,
+    },
+}
+
+/// One provider answer: final text plus any tool calls it requested.
+#[derive(Debug, Clone, Default)]
+pub struct ChatTurn {
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+}
+
 /// One completion request, already resolved from a node's ports + params.
 #[derive(Debug, Clone)]
 pub struct AiRequest {
@@ -150,6 +196,45 @@ pub trait AiGateway: Send + Sync {
     fn providers(&self) -> Result<Vec<ProviderInfo>, AiError> {
         Ok(Vec::new())
     }
+
+    /// App-level tools (toolbar → AI Tools). The `ai.completion` node
+    /// resolves its `app_tools` ids against this catalog. Defaults to an
+    /// empty catalog so a gateway without app config behaves like an app
+    /// with no tools defined.
+    fn tools(&self) -> Result<Vec<AppTool>, AiError> {
+        Ok(Vec::new())
+    }
+
+    /// One turn of a tool-aware conversation.
+    ///
+    /// The default implementation flattens the last user message into
+    /// [`Self::complete`] and reports no tool calls. That keeps gateways
+    /// (and tests) that predate tool support working unchanged; a node
+    /// that *does* configure tools needs a gateway that overrides this.
+    fn complete_turn<'a>(
+        &'a self,
+        req: &'a AiRequest,
+        messages: &'a [ChatMessage],
+        _tools: &'a [ToolSpec],
+    ) -> BoxFuture<'a, Result<ChatTurn, AiError>> {
+        Box::pin(async move {
+            let prompt = messages
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    ChatMessage::User(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| req.prompt.clone());
+            let mut flattened = req.clone();
+            flattened.prompt = prompt;
+            let text = self.complete(&flattened).await?;
+            Ok(ChatTurn {
+                text,
+                tool_calls: Vec::new(),
+            })
+        })
+    }
 }
 
 /// Per-node context handed to an async executor. Owns its strings (and
@@ -160,6 +245,10 @@ pub trait AiGateway: Send + Sync {
 pub struct AiEnv {
     pub node_id: String,
     pub gateway: Arc<dyn AiGateway>,
+    /// How many embedded blueprints deep this run already is. Async
+    /// executors that recurse (`blueprint.subgraph`, subgraph-backed AI
+    /// tools) pass `depth + 1` so the runner can stop a cycle.
+    pub depth: usize,
 }
 
 /// Gateway used when a caller runs a graph without supplying one
@@ -191,6 +280,50 @@ impl RigGateway {
     pub fn new(secrets: SecretStore) -> Self {
         Self { secrets }
     }
+
+    /// Resolve the provider record, credential and endpoint for one
+    /// request. Shared by text completion and tool-aware turns so both
+    /// wires use exactly the same fallback rules.
+    fn resolve(&self, req: &AiRequest) -> Result<(String, AiRequest), AiError> {
+        // Exact provider first. The kind fallback covers a request
+        // that names no provider (`provider_id` empty), which is what
+        // the legacy params path produces, and a store migrated from
+        // the old `kind -> key` map (whose records are id'd by kind).
+        let record = self
+            .secrets
+            .record(&req.provider_id)
+            .map_err(AiError::Secrets)?
+            .or_else(|| self.secrets.record(req.provider.as_str()).ok().flatten());
+
+        let name = record
+            .as_ref()
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| req.provider.as_str().to_string());
+        let stored_key = record
+            .as_ref()
+            .map(|r| r.api_key.trim().to_string())
+            .unwrap_or_default();
+        let record_url = record
+            .as_ref()
+            .map(|r| r.base_url.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // The node already merged the blueprint's legacy `base_url`
+        // with the provider's own endpoint (`resolve_target` decides
+        // which one wins). The record is only a fallback for a request
+        // that names no endpoint at all.
+        let mut resolved = req.clone();
+        if resolved.base_url.is_none() {
+            resolved.base_url = record_url;
+        }
+        let key = match (stored_key.is_empty(), resolved.base_url.as_ref()) {
+            (true, Some(_)) => LOCAL_API_KEY.to_string(),
+            // No credential and no endpoint of our own to send it to.
+            (true, None) => return Err(AiError::MissingKey(name)),
+            (false, _) => stored_key,
+        };
+        Ok((key, resolved))
+    }
 }
 
 impl AiGateway for RigGateway {
@@ -200,44 +333,24 @@ impl AiGateway for RigGateway {
 
     fn complete<'a>(&'a self, req: &'a AiRequest) -> BoxFuture<'a, Result<String, AiError>> {
         Box::pin(async move {
-            // Exact provider first. The kind fallback covers a request
-            // that names no provider (`provider_id` empty), which is what
-            // the legacy params path produces, and a store migrated from
-            // the old `kind -> key` map (whose records are id'd by kind).
-            let record = self
-                .secrets
-                .record(&req.provider_id)
-                .map_err(AiError::Secrets)?
-                .or_else(|| self.secrets.record(req.provider.as_str()).ok().flatten());
-
-            let name = record
-                .as_ref()
-                .map(|r| r.id.clone())
-                .unwrap_or_else(|| req.provider.as_str().to_string());
-            let stored_key = record
-                .as_ref()
-                .map(|r| r.api_key.trim().to_string())
-                .unwrap_or_default();
-            let record_url = record
-                .as_ref()
-                .map(|r| r.base_url.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            // The node already merged the blueprint's legacy `base_url`
-            // with the provider's own endpoint (`resolve_target` decides
-            // which one wins). The record is only a fallback for a request
-            // that names no endpoint at all.
-            let mut resolved = req.clone();
-            if resolved.base_url.is_none() {
-                resolved.base_url = record_url;
-            }
-            let key = match (stored_key.is_empty(), resolved.base_url.as_ref()) {
-                (true, Some(_)) => LOCAL_API_KEY.to_string(),
-                // No credential and no endpoint of our own to send it to.
-                (true, None) => return Err(AiError::MissingKey(name)),
-                (false, _) => stored_key,
-            };
+            let (key, resolved) = self.resolve(req)?;
             providers::complete(&key, &resolved).await
+        })
+    }
+
+    fn tools(&self) -> Result<Vec<AppTool>, AiError> {
+        crate::app_tools::list(self.secrets.dir()).map_err(AiError::Secrets)
+    }
+
+    fn complete_turn<'a>(
+        &'a self,
+        req: &'a AiRequest,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolSpec],
+    ) -> BoxFuture<'a, Result<ChatTurn, AiError>> {
+        Box::pin(async move {
+            let (key, resolved) = self.resolve(req)?;
+            providers::complete_turn(&key, &resolved, messages, tools).await
         })
     }
 }

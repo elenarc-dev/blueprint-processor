@@ -85,3 +85,64 @@ re-elegir modelo en el Inspector. El modelo que ofrece el desplegable es la
 lista que el usuario escribió en el proveedor: se puede escribir cualquier
 otro modelo a mano y se envía tal cual. Decisión técnica correspondiente:
 ADR-005.
+
+## FD-003 — Un blueprint guardado se puede incrustar como un nodo
+
+**Contexto.** Los pipelines grandes repiten subgrafos (una secuencia de
+limpieza, una llamada con reintentos). Copiar esos nodos en cada grafo
+multiplica el mantenimiento y rompe la lectura del canvas.
+
+**Decisión.**
+
+- El nodo `blueprint.subgraph` guarda únicamente el **path** del blueprint
+  que incrusta. En el canvas aparece como un nodo más: una entrada `Then`
+  más los inputs declarados por el blueprint incrustado, y una salida
+  `Then` más una salida por cada nodo `Output` (con su `params.name`).
+- El fichero incrustado es la autoridad: al elegir otro path, el nodo
+  recarga sus puertos y se etiqueta con el nombre del blueprint. Los wires
+  que apuntaban a puertos que ya no existen se descartan al guardar y al
+  aplicar la nueva forma.
+- Al ejecutar, el runner carga el fichero, le pasa los valores cableados
+  como `external_inputs` (mismo contrato que un run normal) y devuelve sus
+  outputs. Un blueprint incrustado puede a su vez incrustar otros, hasta 8
+  niveles; un ciclo (directo o indirecto) falla con un mensaje claro.
+- Si el fichero no está disponible o no es válido, el nodo falla con la
+  ruta en el mensaje y el Inspector muestra el error.
+
+**Consecuencias.** Dos grafos comparten el mismo subgrafo sin duplicarlo, y
+editarlo en su propio fichero afecta a todos los que lo incrustan en el
+siguiente run (no hay copia embebida). El grafo deja de ser autocontenido:
+compartirlo exige compartir también los ficheros incrustados y mantener sus
+rutas. Decisión técnica correspondiente: ADR-006.
+
+## FD-004 — `ai.completion` puede llamar herramientas, en dos formas
+
+**Contexto.** Un prompt aislado no puede consultar datos actuales ni
+ejecutar un subgrafo. Se necesitan tools sin convertir el nodo en un agente
+sin límites ni obligar a meter endpoints en cada blueprint.
+
+**Decisión.**
+
+- **App-level tools.** La toolbar tiene **AI Tools**, un CRUD global de
+tools HTTP (nombre, descripción, JSON Schema, método, URL, cabeceras). El
+nodo las selecciona por id desde el Inspector. La definición vive en la
+máquina, nunca en el blueprint.
+- **Tools de grafo.** El nodo `ai.tool` expone un blueprint guardado como
+  tool: su salida `Tool` se cablea al puerto `Tools` de `ai.completion`
+  (varios se agrupan con `array.create`). El modelo ve el nombre, la
+  descripción y el JSON Schema; al llamarla, sus argumentos se convierten
+  en inputs externos del blueprint y los outputs vuelven como JSON.
+- El bucle es acotado (`Max tool rounds`, 6 por defecto, máximo 16): el
+  modelo pide, el nodo ejecuta, el resultado vuelve. Al agotarse, el run
+  falla con un mensaje que pide subir el límite o simplificar la tarea.
+- Un error de una tool se devuelve al modelo como resultado de esa llamada
+  (puede corregir los argumentos); no aborta el run. Un nombre de tool
+  duplicado o una app tool inexistente sí falla antes de llamar al modelo.
+- Sin tools configuradas el nodo se comporta exactamente como antes.
+
+**Consecuencias.** Las tools de nodo son la vía para "el modelo ejecuta un
+pipeline", y las app-level para "el modelo consulta un servicio". Ambas
+comparten el límite de anidamiento de FD-003. Una app tool sin credenciales
+propias debe llevar su `Authorization` en las cabeceras; no hay tools
+nativas, OAuth ni descubrimiento de esquema. Decisión técnica
+correspondiente: ADR-006.
