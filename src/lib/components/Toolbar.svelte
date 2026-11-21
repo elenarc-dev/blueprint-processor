@@ -12,7 +12,7 @@
     open as openDialog,
     ask,
   } from '@tauri-apps/plugin-dialog';
-  import type { Blueprint } from '$lib/types/blueprint';
+  import type { Blueprint, BlueprintInput, Port } from '$lib/types/blueprint';
   import { makeMeta, type BlueprintMeta } from '$lib/types/blueprint';
   import AiProvidersDialog from './AiProvidersDialog.svelte';
   import AiToolsDialog from './AiToolsDialog.svelte';
@@ -21,6 +21,7 @@
     composeBlueprint,
     makeFlowNode,
     newEdgeId,
+    portFromBlueprintInput,
     type FlowNode,
     type FlowEdge,
   } from '$lib/utils/blueprint-io';
@@ -168,12 +169,12 @@
    * graph with one `blueprint.subgraph` node pointing at the new file.
    *
    * Wiring: wires with both ends inside the selection travel with the group.
-   * Outer wires are matched against the ports the composed blueprint declares
-   * — the same derivation the page's sync applies (`portsForBlueprint`) — so
-   * a wire whose endpoint names a port the group also exposes is reattached
-   * to the subgraph node. Exec `then_in` / `then_out` and the `io.output`
-   * names survive this way; anything else has no counterpart on the wrapper
-   * and is dropped.
+   * Data wires arriving from outside become declared inputs of the group —
+   * with a `blueprint.input` node inside feeding the same internal port — so
+   * they are reattached to the subgraph node on the way in. Wires leaving the
+   * selection reconnect when their source port is one the group exposes: the
+   * exec `then_out` and every `io.output` name. What has no counterpart on
+   * the wrapper is dropped.
    */
   async function handleSaveSelection() {
     const selected = get(nodes).filter((node) => node.selected);
@@ -194,7 +195,58 @@
     subMeta.description = `Group of ${selected.length} nodes extracted from ${
       meta.name.trim() || 'an untitled blueprint'
     }.`;
-    const grouped = composeBlueprint(subMeta, selected, innerEdges);
+
+    // Declare the group's data inputs from the wires arriving from outside.
+    // A declaration only opens the group's interface, so one `blueprint.input`
+    // node is injected and wired to the same target port: at run time the
+    // subgraph executor forwards incoming values as `external_inputs` keyed by
+    // port id, so the value reaches the node that consumed it before.
+    const incoming = outerEdges.filter((edge) => selectedIds.has(edge.target));
+    const byId = new Map(selected.map((node) => [node.id, node]));
+    const declared: BlueprintInput[] = [];
+    const declaredIds = new Set<string>();
+    for (const edge of incoming) {
+      const port = byId
+        .get(edge.target)
+        ?.data.inputs.find((p) => p.id === String(edge.targetHandle ?? ''));
+      if (!port || port.type === 'exec') continue;
+      // `BlueprintInput.id` is the runtime key and must stay token-shaped.
+      if (!/^[a-zA-Z0-9_]+$/.test(port.id) || declaredIds.has(port.id)) continue;
+      declaredIds.add(port.id);
+      declared.push({
+        id: port.id,
+        name: port.name,
+        type: inputTypeForPort(port.type),
+      });
+    }
+
+    const groupedNodes = [...selected];
+    const groupedEdges = [...innerEdges];
+    if (declared.length > 0) {
+      subMeta.metadata.inputs = declared;
+      const inputNode = makeFlowNode('blueprint.input', {
+        x: Math.min(...selected.map((node) => node.position.x)) - 260,
+        y: Math.min(...selected.map((node) => node.position.y)),
+      });
+      inputNode.data.outputs = declared.map(portFromBlueprintInput);
+      groupedNodes.push(inputNode);
+      // One feeder per declared port; `takenInputs` in the parent loop keeps
+      // the extra wires to that port out, so both sides agree on the winner.
+      const fed = new Set<string>();
+      for (const edge of incoming) {
+        const handle = String(edge.targetHandle ?? '');
+        if (!declaredIds.has(handle) || fed.has(handle)) continue;
+        fed.add(handle);
+        groupedEdges.push({
+          id: newEdgeId(inputNode.id, edge.target),
+          source: inputNode.id,
+          sourceHandle: handle,
+          target: edge.target,
+          targetHandle: handle,
+        });
+      }
+    }
+    const grouped = composeBlueprint(subMeta, groupedNodes, groupedEdges);
 
     let path: string | string[] | null = null;
     try {
@@ -302,6 +354,19 @@
       onAfterIo(`Group failed: ${err}`, 'error');
     } finally {
       saving = false;
+    }
+  }
+
+  /** Reverse of `portTypeFromInputType`, for declaring group inputs. */
+  function inputTypeForPort(type: Port['type']): BlueprintInput['type'] {
+    switch (type) {
+      case 'string':
+      case 'number':
+      case 'boolean':
+      case 'array':
+        return type;
+      default:
+        return 'any';
     }
   }
 

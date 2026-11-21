@@ -238,15 +238,19 @@ seleccionado. La acción:
   el blueprint compuesto declara (`portsForBlueprint`), los mismos que el
   sync de la página derivaría del fichero.
 
-**Consecuencias.** Los wires que cruzaban el borde se reconectan al nodo
-Subgraph cuando su puerto coincide con uno que el grupo expone: los ejec.
-`then_in` / `then_out` y los nombres de los `io.output` internos sobreviven,
-una entrada admite un solo cable (como en el canvas) y una salida puede
-seguir ramificándose. Los que no tienen contrapartida en el grupo se
-descartan. La barra de estado informa de cada cifra. Los nodos
-`blueprint.input` no se trasladan como entradas del grupo: `metadata.inputs`
-pertenece al blueprint padre, así que dentro del grupo no emiten puertos.
-La reconexión cubre solo puertos con el mismo id: si el grupo no declara
-entradas, los cables de datos que entraban desde fuera no reaparecen solos.
-No hay deshacer: el fichero nuevo queda en disco aunque el usuario cierre el
-editor después.
+**Consecuencias.** Los cables de datos que entraban desde fuera se convierten
+en entradas del grupo: `metadata.inputs` recibe una declaración por cada
+puerto interno distinto (mismo `id` y tipo equivalente, un solo cable por
+entrada como en el canvas) y se inyecta un nodo `blueprint.input` que
+alimenta al nodo interno que antes recibía el valor. En el grafo padre esos
+cables se reconectan al nodo Subgraph y en ejecución el executor del
+subgrafo los entrega al hijo como `external_inputs` con ese id, así que el
+valor sigue el mismo camino que antes del agrupado. Los cables de salida se
+reconectan contra `then_out` y los nombres de los `io.output` internos, y las
+salidas siguen ramificándose. Lo que no tiene contrapartida en el grupo —por
+ejemplo una entrada cuyo id no es un token válido— se descarta. La barra de
+estado informa de cuántos se reconectaron y cuántos se perdieron. Los
+`blueprint.input` que ya existían en la selección no se copian: el nodo
+inyectado es el único que se traslada, porque `metadata.inputs` pertenece al
+blueprint nuevo. No hay deshacer: el fichero nuevo queda en disco aunque el
+usuario cierre el editor después.
