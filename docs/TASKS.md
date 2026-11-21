@@ -37,8 +37,3 @@ Estas tareas se centran en convertir un MVP funcional en un producto robusto y u
   Realizar *profiling* del motor Rust bajo cargas pesadas de datos (`dataset.csv` con millones de registros) para identificar cuellos de botella de memoria o CPU.
   Affected systems:
   - Backend (Rust)
-
-- [ ] PROD-TECH-007 - Corregir tests de `file.iterate` y unificar `io.input` - [Medium, Testing]
-  `cargo test --lib` falla en tres tests de `executor::nodes::file_iterate_folder`: pasan una ruta de *fichero* a `fs::read_dir`, que espera un directorio (`Not a directory (os error 20)`). Además ese fichero implementa `file.iterate` pero su cabecera y sus tests describen `file.read`, y el executor hace `unwrap()` sobre `params.path`. Fallos presentes ya antes de la integración de IA.
-  Affected systems:
-  - Backend (Rust - executor/nodes/file_iterate_folder.rs)
