@@ -239,17 +239,19 @@ seleccionado. La acción:
   sync de la página derivaría del fichero.
 
 **Consecuencias.** Los cables de datos que entraban desde fuera se convierten
-en entradas del grupo: `metadata.inputs` recibe una declaración por cada
-puerto interno distinto (mismo `id` y tipo equivalente, un solo cable por
-entrada como en el canvas) y se inyecta un nodo `blueprint.input` que
-alimenta al nodo interno que antes recibía el valor. En el grafo padre esos
+en entradas del grupo: cada cable declara su propia entrada con un `id`
+derivado del nodo emisor y del puerto (`read_file_path`) y con sufijo
+numérico si se repite, así que dos consumidores del mismo nombre de puerto no
+se pisan ni compiten por una sola entrada. El `name` visible añade el nodo de
+origen solo cuando repetiría etiqueta. Se inyecta un nodo `blueprint.input`
+que alimenta al nodo interno que antes recibía el valor. En el grafo padre esos
 cables se reconectan al nodo Subgraph y en ejecución el executor del
 subgrafo los entrega al hijo como `external_inputs` con ese id, así que el
 valor sigue el mismo camino que antes del agrupado. Los cables de salida se
 reconectan contra `then_out` y los nombres de los `io.output` internos, y las
-salidas siguen ramificándose. Lo que no tiene contrapartida en el grupo —por
-ejemplo una entrada cuyo id no es un token válido— se descarta. La barra de
-estado informa de cuántos se reconectaron y cuántos se perdieron. Los
+salidas siguen ramificándose. Lo que no tiene contrapartida en el grupo se
+descarta. La barra de estado informa de cuántos se reconectaron y cuántos se
+perdieron. Los
 `blueprint.input` que ya existían en la selección no se copian: el nodo
 inyectado es el único que se traslada, porque `metadata.inputs` pertenece al
 blueprint nuevo. No hay deshacer: el fichero nuevo queda en disco aunque el

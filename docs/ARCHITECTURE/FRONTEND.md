@@ -331,10 +331,12 @@ centroide, con `params.path` apuntando al fichero. El nodo se crea ya con
 los puertos de `portsForBlueprint(grouped)` (la misma derivación que hace el
 sync) y con `data.subgraphPath` puesto, así que el sync no vuelve a leer el
 fichero. Antes de componer, los cables externos entrantes se convierten en
-entradas del grupo: una `BlueprintInput` por id de puerto interno distinto
-(tipo equivalente vía `inputTypeForPort`, un solo cable por entrada) más un
-nodo `blueprint.input` en `minX - 260` cableado a cada nodo interno afectado,
-para que el valor siga llegando a quien lo consumía. Los wires que cruzaban
+entradas del grupo: una `BlueprintInput` por cable, con id
+`tokenId(<label del emisor>_<puerto>)` y sufijo `_2`, `_3`… si se repite
+(tipo equivalente vía `inputTypeForPort`), más un nodo `blueprint.input` en
+`minX - 260` cableado a cada nodo interno afectado, para que el valor siga
+llegando a quien lo consumía. El mapa `declaredIdByEdge` guarda qué id
+corresponde a cada cable para reconectarlo con ese handle. Los wires que cruzaban
 el borde se recorren contra los puertos del nodo: si el extremo externo
 apunta a un puerto con el mismo id, la arista se reconstruye contra el nodo
 Subgraph (`newEdgeId`), con una sola entrada por puerto y conservando el

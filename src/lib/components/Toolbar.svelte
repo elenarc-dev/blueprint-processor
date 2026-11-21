@@ -170,14 +170,17 @@
    *
    * Wiring: wires with both ends inside the selection travel with the group.
    * Data wires arriving from outside become declared inputs of the group —
-   * with a `blueprint.input` node inside feeding the same internal port — so
-   * they are reattached to the subgraph node on the way in. Wires leaving the
+   * each id derived from the sending node and the port, so two consumers of
+   * the same port name stay distinct — with a `blueprint.input` node inside
+   * feeding the same internal port, so they are reattached to the subgraph
+   * node on the way in. Wires leaving the
    * selection reconnect when their source port is one the group exposes: the
    * exec `then_out` and every `io.output` name. What has no counterpart on
    * the wrapper is dropped.
    */
   async function handleSaveSelection() {
-    const selected = get(nodes).filter((node) => node.selected);
+    const allNodes = get(nodes);
+    const selected = allNodes.filter((node) => node.selected);
     if (selected.length === 0) {
       onAfterIo('Select one or more nodes to group', 'error');
       return;
@@ -197,27 +200,37 @@
     }.`;
 
     // Declare the group's data inputs from the wires arriving from outside.
-    // A declaration only opens the group's interface, so one `blueprint.input`
-    // node is injected and wired to the same target port: at run time the
-    // subgraph executor forwards incoming values as `external_inputs` keyed by
-    // port id, so the value reaches the node that consumed it before.
+    // Ids are derived from the sending node plus the port, so two consumers of
+    // the same port name stay distinct instead of collapsing. A declaration
+    // only opens the group's interface, so one `blueprint.input` node is
+    // injected and wired to the same target port: at run time the subgraph
+    // executor forwards incoming values as `external_inputs` keyed by id.
     const incoming = outerEdges.filter((edge) => selectedIds.has(edge.target));
-    const byId = new Map(selected.map((node) => [node.id, node]));
+    const byId = new Map(allNodes.map((node) => [node.id, node]));
     const declared: BlueprintInput[] = [];
-    const declaredIds = new Set<string>();
+    /** Outer edge id → id of the group input it feeds. */
+    const declaredIdByEdge = new Map<string, string>();
+    const usedIds = new Set<string>();
+    const usedNames = new Set<string>();
     for (const edge of incoming) {
       const port = byId
         .get(edge.target)
         ?.data.inputs.find((p) => p.id === String(edge.targetHandle ?? ''));
       if (!port || port.type === 'exec') continue;
-      // `BlueprintInput.id` is the runtime key and must stay token-shaped.
-      if (!/^[a-zA-Z0-9_]+$/.test(port.id) || declaredIds.has(port.id)) continue;
-      declaredIds.add(port.id);
-      declared.push({
-        id: port.id,
-        name: port.name,
-        type: inputTypeForPort(port.type),
-      });
+      const source = byId.get(edge.source);
+      const sourceLabel = source?.data.label || source?.data.kind || 'input';
+      const base = tokenId(`${sourceLabel}_${port.id}`);
+      let id = base;
+      for (let n = 2; usedIds.has(id); n++) id = `${base}_${n}`;
+      usedIds.add(id);
+      declaredIdByEdge.set(edge.id, id);
+      // Repeated names would make the run modal ambiguous; the first keeps the
+      // bare label, later ones say where they come from.
+      const name = usedNames.has(port.name)
+        ? `${sourceLabel} · ${port.name}`
+        : port.name;
+      usedNames.add(name);
+      declared.push({ id, name, type: inputTypeForPort(port.type) });
     }
 
     const groupedNodes = [...selected];
@@ -230,19 +243,17 @@
       });
       inputNode.data.outputs = declared.map(portFromBlueprintInput);
       groupedNodes.push(inputNode);
-      // One feeder per declared port; `takenInputs` in the parent loop keeps
-      // the extra wires to that port out, so both sides agree on the winner.
-      const fed = new Set<string>();
+      // One feeder per declared input, back to the internal port that used to
+      // receive the value.
       for (const edge of incoming) {
-        const handle = String(edge.targetHandle ?? '');
-        if (!declaredIds.has(handle) || fed.has(handle)) continue;
-        fed.add(handle);
+        const id = declaredIdByEdge.get(edge.id);
+        if (!id) continue;
         groupedEdges.push({
           id: newEdgeId(inputNode.id, edge.target),
           source: inputNode.id,
-          sourceHandle: handle,
+          sourceHandle: id,
           target: edge.target,
-          targetHandle: handle,
+          targetHandle: String(edge.targetHandle ?? ''),
         });
       }
     }
@@ -298,18 +309,21 @@
         const sourceHandle = String(edge.sourceHandle ?? '');
         const targetHandle = String(edge.targetHandle ?? '');
         if (selectedIds.has(edge.target)) {
-          // Outside → group. One wire per input, matching the canvas rule.
-          if (!inputIds.has(targetHandle) || takenInputs.has(targetHandle)) {
+          // Outside → group: the declared id when the wire became an input,
+          // else a port the group already exposes (`then_in`). One wire per
+          // input, matching the canvas rule.
+          const handle = declaredIdByEdge.get(edge.id) ?? targetHandle;
+          if (!inputIds.has(handle) || takenInputs.has(handle)) {
             dropped++;
             continue;
           }
-          takenInputs.add(targetHandle);
+          takenInputs.add(handle);
           rewired.push({
             id: newEdgeId(edge.source, subgraph.id),
             source: edge.source,
             sourceHandle,
             target: subgraph.id,
-            targetHandle,
+            targetHandle: handle,
           });
         } else {
           // Group → outside. An output may fan out, so only identical wires
@@ -368,6 +382,16 @@
       default:
         return 'any';
     }
+  }
+
+  /** Token-shaped id for a declared group input (`metadata.inputs` key). */
+  function tokenId(value: string): string {
+    const id = value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return id || 'input';
   }
 
   /** Filename-safe slug for the default path of a grouped blueprint. */
