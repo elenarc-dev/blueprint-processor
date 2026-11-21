@@ -496,18 +496,19 @@
   // effect watches the inputsStorageKey derivation and, on the
   // transition from an unsaved UUID to a real on-disk path,
   // copies the prior unsaved entry over and clears it. Tracks the
-  // prior key in a `$state` mirror so the effect can detect the
-  // monotonic transition (read-once via `untrack` so the effect
-  // doesn't loop on its own write).
+  // prior key in a `$state` mirror, written only when the key or the
+  // blueprint id actually changed: assigning a fresh object on every
+  // pass would invalidate the state this effect reads and re-run
+  // forever (`effect_update_depth_exceeded`).
   let priorStorage = $state<{ key: string; bpId: string } | null>(null);
   $effect(() => {
     const next = inputsStorageKey;
     const bpId = bpMeta.id;
     const prev = priorStorage;
-    // The write below schedules one extra Svelte 5 effect cycle —
-    // on the next run, prev === next (settling), so the migration
-    // guard correctly fails and the loop terminates. The double-run
-    // is a documented Svelte 5 quirk, not a bug.
+    // Bail out without writing when nothing moved. The mirror is a
+    // fresh object, so an unconditional assignment would schedule this
+    // effect again on every pass and freeze the app.
+    if (prev !== null && prev.key === next && prev.bpId === bpId) return;
     priorStorage = { key: next, bpId };
     if (
       prev !== null &&
