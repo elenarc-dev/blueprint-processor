@@ -13,7 +13,8 @@ Bienvenido a la documentación de **Blueprint Processor**, una aplicación de es
 | [`ARCHITECTURE/recipes.md`](ARCHITECTURE/recipes.md) | Cookbook de "cómo extiendo X" — añadir nodos, params, port types, Tauri commands | Cualquiera que extienda la app |
 | [`ARCHITECTURE/decisions.md`](ARCHITECTURE/decisions.md) | Decisiones técnicas y de seguridad (ADR) | Contributors, revisores |
 | [`ARCHITECTURE/PLUGINS.md`](ARCHITECTURE/PLUGINS.md) | Propuesta (no implementada) de plugins de nodos: opciones evaluadas, diseño y plan por fases | Quien quiera extender la app sin recompilar |
-| [`changelog/0.1.0.md`](changelog/0.1.0.md) | Cambios de la versión actual (release 0.1.0) | Cualquiera que instale o actualice |
+| [`changelog/0.1.1.md`](changelog/0.1.1.md) | Cambios de la versión actual (release 0.1.1) | Cualquiera que instale o actualice |
+| [`changelog/0.1.0.md`](changelog/0.1.0.md) | Changelog de la release anterior | Historial |
 | [`TASKS.md`](TASKS.md) | Tareas pendientes y en progreso con estados | Todo el equipo |
 
 ## 🗂️ Estructura de `docs/`

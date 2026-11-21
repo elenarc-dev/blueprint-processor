@@ -1,6 +1,6 @@
 [package]
 name = "blueprint-proocessor"
-version = "0.1.0"
+version = "0.1.1"
 description = "A modular data-processor whose processes are defined as visual blueprints"
 authors = ["you"]
 edition = "2021"
