@@ -17,6 +17,7 @@
 -->
 <script lang="ts">
   import type { BlueprintMeta, BlueprintInput } from '$lib/types/blueprint';
+  import { PORT_LABELS } from '$lib/types/blueprint';
   import { invoke } from '@tauri-apps/api/core';
   import {
     aiProviders,
@@ -32,6 +33,7 @@
     type FlowNode,
     type NodeData,
   } from '$lib/utils/blueprint-io';
+  import { subgraphDefs } from '$lib/utils/subgraphs.svelte';
 
   interface Props {
     meta: BlueprintMeta;
@@ -501,6 +503,36 @@
         {:else}
           <p class="muted">This node has no editable parameters.</p>
         {/if}
+
+        {#if d.kind === 'blueprint.subgraph' && String(d.params?.path ?? '').trim()}
+          {@const embedded = subgraphDefs.value[String(d.params.path).trim()]}
+          <h4>Embedded inputs</h4>
+          {#if !embedded}
+            <p class="muted small">Reading the embedded blueprint…</p>
+          {:else if embedded.error}
+            <p class="field-hint">
+              Could not read the embedded blueprint: {embedded.error}
+            </p>
+          {:else if embedded.inputs.filter((port) => port.type !== 'exec').length === 0}
+            <p class="muted small">
+              This subgraph declares no inputs, only the exec <code>then_in</code>.
+            </p>
+          {:else}
+            <ul class="subgraph-ports">
+              {#each embedded.inputs.filter((port) => port.type !== 'exec') as port (port.id)}
+                <li>
+                  <code>{port.id}</code>
+                  <span>{port.name}</span>
+                  <em>{PORT_LABELS[port.type]}</em>
+                </li>
+              {/each}
+            </ul>
+            <p class="field-hint">
+              Read from the embedded file; edit them inside the subgraph
+              (Open embedded blueprint ↗).
+            </p>
+          {/if}
+        {/if}
       {:else}
         <p class="muted">Unknown node kind.</p>
       {/if}
@@ -792,6 +824,48 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  /* Read-only summary of a subgraph's declared inputs (Inspector). */
+  .subgraph-ports {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .subgraph-ports li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    background: white;
+    border: 1px solid #e4e4e7;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11.5px;
+  }
+  .subgraph-ports code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    color: #3f3f46;
+    background: #f4f4f5;
+    border: 1px solid #e4e4e7;
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .subgraph-ports span {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #18181b;
+  }
+  .subgraph-ports em {
+    flex: 0 0 auto;
+    font-style: normal;
+    font-size: 10px;
+    color: #71717a;
   }
   .input-row {
     background: white;
