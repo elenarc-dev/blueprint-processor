@@ -327,9 +327,14 @@ vía `resetGraphStack`.
 compone un blueprint con esos nodos y los wires internos vía
 `composeBlueprint` + `makeMeta`, lo escribe con `save_blueprint` y luego
 sustituye los nodos por un `blueprint.subgraph` (`makeFlowNode`) en el
-centroide, con `params.path` apuntando al fichero. Los wires que cruzaban
-el borde se descartan; el sync de la página deriva los puertos del fichero
-nuevo.
+centroide, con `params.path` apuntando al fichero. El nodo se crea ya con
+los puertos de `portsForBlueprint(grouped)` (la misma derivación que hace el
+sync) y con `data.subgraphPath` puesto, así que el sync no vuelve a leer el
+fichero. Los wires que cruzaban el borde se recorren contra esos puertos: si
+el extremo externo apunta a un puerto con el mismo id, la arista se
+reconstruye contra el nodo Subgraph (`newEdgeId`), con una sola entrada por
+puerto y conservando el fan-out de las salidas; el resto se descarta y se
+cuenta en la barra de estado junto a los reconectados.
 
 La migración del historial de inputs (`unsaved:<id>` → path) exige además
 que `bpMeta.id` no haya cambiado, para que cambiar de nivel no copie los

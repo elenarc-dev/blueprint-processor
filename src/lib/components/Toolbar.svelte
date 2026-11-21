@@ -20,9 +20,11 @@
     blueprintToFlow,
     composeBlueprint,
     makeFlowNode,
+    newEdgeId,
     type FlowNode,
     type FlowEdge,
   } from '$lib/utils/blueprint-io';
+  import { portsForBlueprint } from '$lib/utils/subgraphs.svelte';
 
   interface Props {
     meta: BlueprintMeta;
@@ -163,10 +165,15 @@
 
   /**
    * Save the selected nodes as their own blueprint and replace them in this
-   * graph with one `blueprint.subgraph` node pointing at the new file. Only
-   * wires with both ends inside the selection travel with it; wires crossing
-   * the boundary are dropped because the group has no port contract until
-   * the file exists (the node derives its ports on sync).
+   * graph with one `blueprint.subgraph` node pointing at the new file.
+   *
+   * Wiring: wires with both ends inside the selection travel with the group.
+   * Outer wires are matched against the ports the composed blueprint declares
+   * — the same derivation the page's sync applies (`portsForBlueprint`) — so
+   * a wire whose endpoint names a port the group also exposes is reattached
+   * to the subgraph node. Exec `then_in` / `then_out` and the `io.output`
+   * names survive this way; anything else has no counterpart on the wrapper
+   * and is dropped.
    */
   async function handleSaveSelection() {
     const selected = get(nodes).filter((node) => node.selected);
@@ -178,9 +185,9 @@
     const innerEdges = get(edges).filter(
       (edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target),
     );
-    const outerWires = get(edges).filter(
+    const outerEdges = get(edges).filter(
       (edge) => selectedIds.has(edge.source) !== selectedIds.has(edge.target),
-    ).length;
+    );
 
     const name = `${meta.name.trim() || 'Untitled'} · group`;
     const subMeta = makeMeta(name);
@@ -218,24 +225,77 @@
         }),
         { x: 0, y: 0 },
       );
+      const ports = portsForBlueprint(grouped);
       const subgraph = makeFlowNode('blueprint.subgraph', center);
       subgraph.data.params = { ...subgraph.data.params, path: result.path };
       subgraph.data.label = name;
+      // Mirror the file's ports now: the reconnection below runs against the
+      // real contract, and `subgraphPath` tells the page's sync these ports
+      // already belong to that file (no extra read, no placeholder flash).
+      subgraph.data.inputs = ports.inputs;
+      subgraph.data.outputs = ports.outputs;
+      subgraph.data.subgraphPath = result.path;
+
+      const inputIds = new Set(ports.inputs.map((port) => port.id));
+      const outputIds = new Set(ports.outputs.map((port) => port.id));
+      const takenInputs = new Set<string>();
+      const takenOutputs = new Set<string>();
+      const rewired: FlowEdge[] = [];
+      let dropped = 0;
+      for (const edge of outerEdges) {
+        const sourceHandle = String(edge.sourceHandle ?? '');
+        const targetHandle = String(edge.targetHandle ?? '');
+        if (selectedIds.has(edge.target)) {
+          // Outside → group. One wire per input, matching the canvas rule.
+          if (!inputIds.has(targetHandle) || takenInputs.has(targetHandle)) {
+            dropped++;
+            continue;
+          }
+          takenInputs.add(targetHandle);
+          rewired.push({
+            id: newEdgeId(edge.source, subgraph.id),
+            source: edge.source,
+            sourceHandle,
+            target: subgraph.id,
+            targetHandle,
+          });
+        } else {
+          // Group → outside. An output may fan out, so only identical wires
+          // collapse.
+          const key = `${sourceHandle}\u0000${edge.target}\u0000${targetHandle}`;
+          if (!outputIds.has(sourceHandle) || takenOutputs.has(key)) {
+            dropped++;
+            continue;
+          }
+          takenOutputs.add(key);
+          rewired.push({
+            id: newEdgeId(subgraph.id, edge.target),
+            source: subgraph.id,
+            sourceHandle,
+            target: edge.target,
+            targetHandle,
+          });
+        }
+      }
 
       nodes.set([
         ...get(nodes).filter((node) => !selectedIds.has(node.id)),
         subgraph,
       ]);
-      edges.set(
-        get(edges).filter(
+      edges.set([
+        ...get(edges).filter(
           (edge) =>
             !selectedIds.has(edge.source) && !selectedIds.has(edge.target),
         ),
-      );
+        ...rewired,
+      ]);
 
       onAfterIo(
         `Grouped ${selected.length} nodes → ${result.path}` +
-          (outerWires > 0 ? ` · ${outerWires} outer wire(s) dropped` : ''),
+          (rewired.length > 0
+            ? ` · ${rewired.length} outer wire(s) reconnected`
+            : '') +
+          (dropped > 0 ? ` · ${dropped} outer wire(s) dropped` : ''),
         'info',
       );
     } catch (err) {

@@ -234,13 +234,19 @@ seleccionado. La acción:
 - pide ruta con el diálogo nativo y escribe el fichero con `save_blueprint`;
 - sustituye en el grafo actual los nodos seleccionados por un único nodo
   `blueprint.subgraph` cuyo `params.path` apunta al fichero recién creado,
-  colocado en el centroide de la selección. El sync de la página deriva sus
-  puertos y su nombre del fichero.
+  colocado en el centroide de la selección. El nodo recibe los puertos que
+  el blueprint compuesto declara (`portsForBlueprint`), los mismos que el
+  sync de la página derivaría del fichero.
 
-**Consecuencias.** Los wires que cruzaban el borde de la selección se
-eliminan, porque el grupo no declara puertos hasta que existe el fichero; el
-número descartado se reporta en la barra de estado. Los nodos
+**Consecuencias.** Los wires que cruzaban el borde se reconectan al nodo
+Subgraph cuando su puerto coincide con uno que el grupo expone: los ejec.
+`then_in` / `then_out` y los nombres de los `io.output` internos sobreviven,
+una entrada admite un solo cable (como en el canvas) y una salida puede
+seguir ramificándose. Los que no tienen contrapartida en el grupo se
+descartan. La barra de estado informa de cada cifra. Los nodos
 `blueprint.input` no se trasladan como entradas del grupo: `metadata.inputs`
 pertenece al blueprint padre, así que dentro del grupo no emiten puertos.
+La reconexión cubre solo puertos con el mismo id: si el grupo no declara
+entradas, los cables de datos que entraban desde fuera no reaparecen solos.
 No hay deshacer: el fichero nuevo queda en disco aunque el usuario cierre el
 editor después.
