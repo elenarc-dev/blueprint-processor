@@ -12,7 +12,7 @@ El frontend es una app SvelteKit + Svelte 5 + TypeScript. El runtime es una úni
 | `src/app.html` | 13 | Plantilla shell. |
 | `src/routes/+layout.ts` | 5 | `ssr = false` — Tauri no puede hacer SSR. |
 | `src/routes/+layout.svelte` | 7 | Pass-through `<slot/>`. |
-| `src/routes/+page.svelte` | 242 | Página principal; monta los componentes, es dueña de los writables, los mirrors de estado, el handler de run y la status bar. |
+| `src/routes/+page.svelte` | ~520 | Página principal; monta los componentes, es dueña de los writables, los mirrors de estado, el handler de run, la pila de grafos anidados (`graphStack`) y la status bar. |
 | `src/lib/types/blueprint.ts` | 120 | TS canónico para la forma en disco + `PortDataType`, `PORT_COLORS`, `PORT_LABELS`, `makeMeta`, `stripMeta`. DEBE mantenerse en sync con `src-tauri/src/blueprint.rs`. |
 | `src/lib/nodes/catalog.ts` | 302 | `NODE_CATALOG` — fuente única de verdad para qué puede colocar el usuario. Cada entrada es `kind, category, label, description, inputs[], outputs[], params[]`. |
 | `src/lib/utils/blueprint-io.ts` | 143 | `composeBlueprint`, `blueprintToFlow`, `makeFlowNode`, `newEdgeId`, `edgeFromConnection`. El puente entre estado runtime de Svelte Flow y la forma `Blueprint` en disco. |
@@ -29,6 +29,7 @@ El frontend es una app SvelteKit + Svelte 5 + TypeScript. El runtime es una úni
 | `src/lib/utils/ai-tools.svelte.ts` | ~55 | Espejo reactivo del catálogo global de app tools (`aiTools`, `AppTool`, `refreshAiTools`, `ensureAiTools`, `setAiTools`). |
 | `src/lib/utils/subgraphs.svelte.ts` | ~110 | Caché path → definición de blueprint embebido (`ensureSubgraph`, `portsForBlueprint`). Un error de lectura se cachea como def con solo puertos `exec` + `error`. |
 | `src/lib/components/AiToolsDialog.svelte` | ~300 | Diálogo CRUD de app tools (botón **AI Tools**). Llama a `tools_list` / `tools_save` / `tools_remove`. |
+| `src/lib/components/GraphBreadcrumb.svelte` | ~120 | Barra de migas de la edición anidada (raíz › sub › …) con ancestros clicables y **← Parent graph**. Solo se muestra cuando la pila tiene más de un nivel. |
 
 ## Build / configs de runtime
 
@@ -298,6 +299,25 @@ cada nodo `io.output`, con `params.name` como id. `+page.svelte` tiene un
 descarta edges que apuntaban a puertos desaparecidos; `data.subgraphPath`
 recuerda a qué path corresponden los puertos actuales para que el efecto se
 estabilice. Un fallo de lectura se cachea y se muestra en el Inspector.
+
+## Navegación de subgrafos (grafos anidados)
+
+`+page.svelte` mantiene `graphStack: GraphFrame[]` (ancestros, del más
+externo al más interno). `openSubgraph(path)` carga el fichero incrustado,
+apila un snapshot del grafo vivo (`meta`, `nodes`, `edges`, `path`) y pone
+el hijo en el canvas; `navigateTo(depth)` restaura un frame y descarta los
+niveles por debajo, invalidando antes su definición en
+`subgraphs.svelte.ts` y limpiando `subgraphPath` en los nodos restaurados
+que lo incrustan (para que el efecto de sincronización re-derive puertos).
+`GraphBreadcrumb` pinta la cadena y `goBack()` equivale a
+`navigateTo(stack.length - 1)`. Se rechaza abrir un path que ya esté en la
+cadena. `Toolbar` recibe `onResetNesting` y limpia la pila en Load / New.
+Un botón en el cuerpo de `blueprint.subgraph` / `ai.tool` emite
+`blueprint:open-subgraph`, que la página escucha en `onMount`.
+
+La migración del historial de inputs (`unsaved:<id>` → path) exige además
+que `bpMeta.id` no haya cambiado, para que cambiar de nivel no copie los
+inputs del padre al hijo.
 
 ## `src/lib/components/Toolbar.svelte`
 

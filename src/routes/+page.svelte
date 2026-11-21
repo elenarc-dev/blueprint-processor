@@ -21,7 +21,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { writable, type Writable } from 'svelte/store';
+  import { get, writable, type Writable } from 'svelte/store';
   import { page as pageStore } from '$app/stores';
   import { invoke } from '@tauri-apps/api/core';
   import { SvelteFlowProvider } from '@xyflow/svelte';
@@ -37,9 +37,13 @@
   import type { RunResult } from '$lib/utils/runner-io';
   import { runBlueprint as runInRust } from '$lib/utils/runner-io';
   import LogsPanel from '$lib/components/LogsPanel.svelte';
+  import GraphBreadcrumb from '$lib/components/GraphBreadcrumb.svelte';
   import { blueprintToFlow } from '$lib/utils/blueprint-io';
   import { blueprintInputs } from '$lib/utils/blueprint-context.svelte';
-  import { ensureSubgraph } from '$lib/utils/subgraphs.svelte';
+  import {
+    ensureSubgraph,
+    invalidateSubgraph,
+  } from '$lib/utils/subgraphs.svelte';
   import {
     loadInputHistory,
     saveInputHistory,
@@ -83,6 +87,34 @@
    * the dashboard's `?path=…` deep-link.
    */
   let currentFilePath = $state<string | null>(null);
+
+  /**
+   * One ancestor kept while an embedded blueprint is being edited. The
+   * frame owns its meta / nodes / edges so parent edits that were never
+   * saved survive the round-trip into the child.
+   */
+  interface GraphFrame {
+    name: string;
+    path: string | null;
+    meta: BlueprintMeta;
+    nodes: FlowNode[];
+    edges: FlowEdge[];
+  }
+  /** Ancestors of the graph on the canvas, outermost first. Empty at the
+   *  root; every entry is a level the breadcrumb can return to. */
+  let graphStack = $state<GraphFrame[]>([]);
+
+  /** Breadcrumb entries: every ancestor plus the live graph. */
+  const graphTrail = $derived([
+    ...graphStack.map((frame, depth) => ({
+      name: frame.name.trim() || frame.path || `Level ${depth + 1}`,
+      depth,
+    })),
+    {
+      name: bpMeta.name.trim() || currentFilePath || 'Untitled Blueprint',
+      depth: graphStack.length,
+    },
+  ]);
 
   // Mirrors of the writables for reactive display.
   let flowNodes = $state<FlowNode[]>([]);
@@ -175,11 +207,26 @@
       kind: 'info',
     };
 
+    // "Open embedded blueprint" button in a subgraph / tool node. The
+    // node is rendered by a generic component, so it talks to the page
+    // through the same window-event pattern as palette click-to-spawn.
+    const openHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string }>).detail;
+      if (detail?.path) void openSubgraph(detail.path);
+    };
+    window.addEventListener('blueprint:open-subgraph', openHandler as EventListener);
+
     // Handle dashboard deep-link `?path=…` (loaded by the Dashboard).
     const searchPath = $pageStore.url.searchParams.get('path');
     if (searchPath) {
       void loadFromPath(searchPath, /* stripQueryAfter */ true);
     }
+
+    return () =>
+      window.removeEventListener(
+        'blueprint:open-subgraph',
+        openHandler as EventListener,
+      );
   });
 
   /** Load a blueprint file from disk and hydrate the editor state.
@@ -225,6 +272,118 @@
 
   function commitPath(next: string | null) {
     currentFilePath = next;
+  }
+
+  /** Clear run output when the canvas switches documents. */
+  function resetRunState() {
+    runResult = null;
+    runError = null;
+    logsOpen = false;
+  }
+
+  /**
+   * Load `path` and edit it on the same canvas, keeping the current graph
+   * underneath in `graphStack`. The live graph is snapshotted *before* the
+   * child replaces it, so going back restores even unsaved parent edits.
+   *
+   * A path that is already in the chain is refused: opening it again would
+   * either duplicate a level or create a cycle in the breadcrumb.
+   */
+  async function openSubgraph(rawPath: string) {
+    const path = rawPath.trim();
+    if (!path) {
+      status = {
+        message: 'Open subgraph: choose a blueprint for this node first',
+        kind: 'error',
+      };
+      return;
+    }
+    if (running) {
+      status = {
+        message: 'Wait for the current run to finish before opening a subgraph',
+        kind: 'error',
+      };
+      return;
+    }
+    if (path === currentFilePath || graphStack.some((frame) => frame.path === path)) {
+      status = {
+        message: `'${path}' is already open in this nesting chain`,
+        kind: 'error',
+      };
+      return;
+    }
+
+    try {
+      const json = await invoke<string>('load_blueprint', { path });
+      const parsed = JSON.parse(json) as Blueprint;
+      const flow = blueprintToFlow(parsed);
+      const frame: GraphFrame = {
+        name: bpMeta.name,
+        path: currentFilePath,
+        meta: {
+          ...bpMeta,
+          metadata: {
+            ...bpMeta.metadata,
+            inputs: bpMeta.metadata.inputs.map((input) => ({ ...input })),
+          },
+        },
+        nodes: [...get(nodes)],
+        edges: [...get(edges)],
+      };
+      graphStack = [...graphStack, frame];
+      nodes.set(flow.nodes);
+      edges.set(flow.edges);
+      bpMeta = stripMeta(parsed);
+      currentFilePath = path;
+      resetRunState();
+      status = { message: `Editing embedded blueprint → ${path}`, kind: 'info' };
+    } catch (err) {
+      status = { message: `Open subgraph failed: ${err}`, kind: 'error' };
+    }
+  }
+
+  /**
+   * Restore the frame at `depth` (an index in `graphStack`) and drop every
+   * level below it. The child we are leaving is invalidated in the subgraph
+   * cache and any restored node that embeds it has `subgraphPath` cleared,
+   * so the sync effect re-derives ports from the (possibly edited) file.
+   */
+  function navigateTo(depth: number) {
+    if (depth < 0 || depth >= graphStack.length) return;
+    const leaving = [
+      ...graphStack.slice(depth + 1).map((frame) => frame.path),
+      currentFilePath,
+    ].filter((path): path is string => !!path);
+    const frame = graphStack[depth];
+    for (const path of leaving) invalidateSubgraph(path);
+
+    graphStack = graphStack.slice(0, depth);
+    const restored = frame.nodes.map((node) => {
+      const embedded = String(
+        (node.data as NodeData | undefined)?.params?.path ?? '',
+      );
+      return embedded && leaving.includes(embedded)
+        ? { ...node, data: { ...node.data, subgraphPath: undefined } }
+        : node;
+    });
+    nodes.set(restored);
+    edges.set(frame.edges);
+    bpMeta = frame.meta;
+    currentFilePath = frame.path;
+    resetRunState();
+    status = {
+      message: `Back to ${frame.meta.name || frame.path || 'parent graph'}`,
+      kind: 'info',
+    };
+  }
+
+  function goBack() {
+    navigateTo(graphStack.length - 1);
+  }
+
+  /** Load / New replace the document, so the nesting chain no longer holds. */
+  function resetGraphStack() {
+    graphStack = [];
   }
 
   // Apply a NodeData patch (label/params) coming from the Inspector.
@@ -280,22 +439,28 @@
   // prior key in a `$state` mirror so the effect can detect the
   // monotonic transition (read-once via `untrack` so the effect
   // doesn't loop on its own write).
-  let priorStorageKey = $state<string | null>(null);
+  let priorStorage = $state<{ key: string; bpId: string } | null>(null);
   $effect(() => {
     const next = inputsStorageKey;
-    const prev = priorStorageKey;
+    const bpId = bpMeta.id;
+    const prev = priorStorage;
     // The write below schedules one extra Svelte 5 effect cycle —
     // on the next run, prev === next (settling), so the migration
     // guard correctly fails and the loop terminates. The double-run
     // is a documented Svelte 5 quirk, not a bug.
-    priorStorageKey = next;
+    priorStorage = { key: next, bpId };
     if (
       prev !== null &&
-      prev !== next &&
-      prev.startsWith('unsaved:') &&
+      prev.key !== next &&
+      // Opening a subgraph also changes the key, but it changes the
+      // blueprint too; migrating there would copy the parent's input
+      // history into the child. Only a save of the SAME blueprint
+      // (`bpMeta.id` unchanged) carries history to a path key.
+      prev.bpId === bpId &&
+      prev.key.startsWith('unsaved:') &&
       currentFilePath !== null
     ) {
-      const carried = loadInputHistory(prev);
+      const carried = loadInputHistory(prev.key);
       if (carried && Object.keys(carried).length > 0) {
         saveInputHistory(next, carried);
       }
@@ -305,7 +470,7 @@
       // collide with if the user picked up the same UUID (very
       // unlikely with crypto.randomUUID, but cheap to defensively
       // prune).
-      clearInputHistory(prev);
+      clearInputHistory(prev.key);
     }
   });
 
@@ -383,10 +548,13 @@
     onMetaChange={commitMeta}
     onPathChange={commitPath}
     onAfterIo={onAfterIoWithInventory}
+    onResetNesting={resetGraphStack}
     {logsOpen}
     logCount={runResult?.logs.length ?? 0}
     onToggleLogs={() => (logsOpen = !logsOpen)}
   />
+
+  <GraphBreadcrumb trail={graphTrail} onNavigate={navigateTo} onBack={goBack} />
 
   <div class="main">
     <Palette />
@@ -409,6 +577,7 @@
       nodes={flowNodes}
       onMetaChange={commitMeta}
       onNodeSave={handleNodeSave}
+      onOpenSubgraph={openSubgraph}
     />
     <LogsPanel
       result={runResult}

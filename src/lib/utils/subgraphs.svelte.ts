@@ -66,6 +66,21 @@ function fallbackDef(path: string, error: string): SubgraphDef {
 }
 
 /**
+ * Drop a cached definition so the next `ensureSubgraph` re-reads the file.
+ *
+ * Called when navigation returns from an embedded blueprint: its ports may
+ * have changed while it was open, so the parent's subgraph node has to
+ * re-derive them instead of trusting the cached shape.
+ */
+export function invalidateSubgraph(path: string): void {
+  if (!(path in subgraphDefs.value)) return;
+  const next = { ...subgraphDefs.value };
+  delete next[path];
+  subgraphDefs.value = next;
+  inFlight.delete(path);
+}
+
+/**
  * Resolve a subgraph definition, caching both successes and failures.
  *
  * Concurrent callers for the same path share one IPC round-trip. A cached

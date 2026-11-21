@@ -38,8 +38,10 @@
     nodes: FlowNode[];
     onMetaChange: (next: BlueprintMeta) => void;
     onNodeSave: (nodeId: string, patch: Partial<NodeData>) => void;
+    /** Open an embedded blueprint on the canvas (nested editing). */
+    onOpenSubgraph: (path: string) => void;
   }
-  let { meta, nodes, onMetaChange, onNodeSave }: Props = $props();
+  let { meta, nodes, onMetaChange, onNodeSave, onOpenSubgraph }: Props = $props();
 
   const selectedNode = $derived(
     nodes.find((n) => n.selected && (n.data as NodeData)?.kind) ?? null,
@@ -395,6 +397,15 @@
                     blueprint you want to embed, then reopen this panel.
                   </p>
                 {/if}
+                <button
+                  class="open-subgraph"
+                  type="button"
+                  disabled={!current.trim()}
+                  onclick={() => onOpenSubgraph(current)}
+                  title="Edit this blueprint on the same canvas; go back from the bar above the editor"
+                >
+                  Open embedded blueprint ↗
+                </button>
                 {#if typeof d.params.subgraphError === 'string' && d.params.subgraphError}
                   <p class="field-hint">
                     Could not read the embedded blueprint: {d.params.subgraphError}
@@ -702,6 +713,31 @@
     border: 1px solid #e4e4e7;
     border-radius: 4px;
     padding: 6px 8px;
+  }
+  .open-subgraph {
+    width: 100%;
+    margin-top: 4px;
+    background: white;
+    border: 1px solid #2d7cf1;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #2d7cf1;
+    cursor: pointer;
+    transition:
+      background 0.1s ease,
+      color 0.1s ease,
+      transform 0.05s ease;
+  }
+  .open-subgraph:hover:not(:disabled) {
+    background: #2d7cf1;
+    color: white;
+  }
+  .open-subgraph:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   .muted {

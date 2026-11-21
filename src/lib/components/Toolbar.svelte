@@ -41,6 +41,12 @@
      */
     onPathChange: (next: string | null) => void;
     onAfterIo: (msg: string, kind: 'info' | 'error') => void;
+    /**
+     * Load / New replace the whole document, so any subgraph nesting chain
+     * the page is holding no longer applies. Called on the success path of
+     * those two actions.
+     */
+    onResetNesting: () => void;
     /** Whether the right-hand run-log drawer is open. */
     logsOpen: boolean;
     /** Entry count of the last run, shown next to the Logs button. */
@@ -55,6 +61,7 @@
     onMetaChange,
     onPathChange,
     onAfterIo,
+    onResetNesting,
     logsOpen,
     logCount,
     onToggleLogs,
@@ -151,6 +158,7 @@
       const json = await invoke<string>('load_blueprint', { path });
       const parsed = JSON.parse(json) as Blueprint;
       const flow = blueprintToFlow(parsed);
+      onResetNesting();
       nodes.set(flow.nodes);
       edges.set(flow.edges);
       onMetaChange({
@@ -184,6 +192,7 @@
     }
     nodes.set([]);
     edges.set([]);
+    onResetNesting();
     // Fresh metadata envelope — `makeMeta` produces a new UUID + stamps
     // creation time. Avoids stale `metadata.tags` / `id` leaking in via
     // an object spread.

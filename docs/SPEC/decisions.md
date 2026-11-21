@@ -178,3 +178,37 @@ coste depende del modelo elegido. El límite práctico lo pone el proveedor:
 una petición con demasiadas imágenes o demasiado grandes devuelve su error
 verbatim. Decisión técnica: ADR-006 (el wire multimodal vive junto al
 tool-calling en `ai/providers.rs`).
+
+## FD-006 — Un subgrafo se edita en el mismo canvas, anidado, con vuelta al padre
+
+**Contexto.** Abrir el blueprint incrustado como si fuera otro documento
+obligaba a recargar mentalmente el grafo padre al volver y perdía los
+cambios no guardados del padre. A la vez, editar el subgrafo "dentro" del
+canvas sin salir de la aplicación tiene que dejar claro en qué nivel se
+está trabajando.
+
+**Decisión.**
+
+- Desde el cuerpo de un nodo `blueprint.subgraph` / `ai.tool` (botón
+  **Open embedded blueprint**) o desde el Inspector se abre el fichero
+  incrustado en el mismo canvas. El grafo padre se apila con su estado
+  actual, incluidos los cambios sin guardar.
+- Una barra de migas bajo la toolbar muestra la cadena completa
+  (`raíz › sub › sub-sub`). Cada ancestro es clicable y **← Parent graph**
+  vuelve un nivel. No hay un límite propio de niveles: el runner sigue
+  imponiendo su máximo de 8 para ejecutar.
+- `Save` guarda el nivel activo (el hijo si se abrió un subgrafo). `Load` y
+  `New` descartan la pila porque reemplazan el documento entero.
+- Al volver se refrescan los puertos del nodo contenedor desde el fichero
+  editado; si el subgrafo cambió de interfaz, los wires a puertos
+  desaparecidos se podan como en cualquier cambio de forma.
+- Abrir un path que ya está en la cadena se rechaza (evita ciclos de
+  navegación y niveles duplicados). Se rechaza también mientras hay un run
+  en curso.
+
+**Consecuencias.** El padre conserva sus cambios sin guardar mientras se
+edita el hijo, pero no hay historial de navegación más allá de la pila
+actual: volver descarta los niveles hijos, incluidos sus cambios no
+guardados (el usuario debe guardarlos antes). El historial de inputs de
+cada nivel se guarda bajo su propio path o `unsaved:<id>`; cambiar de nivel
+no lo migra.

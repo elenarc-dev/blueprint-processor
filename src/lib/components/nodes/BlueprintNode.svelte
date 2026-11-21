@@ -71,6 +71,16 @@
     }));
   }
 
+  /** Ask the page to edit the embedded blueprint on the same canvas. */
+  function openEmbedded(event: MouseEvent) {
+    event.stopPropagation();
+    const path = String(d.params?.path ?? '').trim();
+    if (!path) return;
+    window.dispatchEvent(
+      new CustomEvent('blueprint:open-subgraph', { detail: { path } }),
+    );
+  }
+
   // For `blueprint.input` nodes: the source-port set is owned by the
   // PARENT blueprint's `metadata.inputs`, summarised here through
   // `portFromBlueprintInput` so `out.type` lands safely inside the
@@ -307,6 +317,20 @@
   </div>
 
   <div class="body">
+    {#if d.kind === 'blueprint.subgraph' || d.kind === 'ai.tool'}
+      <div class="row editor">
+        <button
+          class="open-subgraph-btn"
+          type="button"
+          disabled={!String(d.params?.path ?? '').trim()}
+          title="Edit the embedded blueprint on this canvas; return with the bar above the editor"
+          onclick={openEmbedded}
+        >
+          Open embedded blueprint ↗
+        </button>
+      </div>
+    {/if}
+
     {#each visibleInputs as input (input.id)}
         <!-- Type-exclusion gate lives at the line below
              (`input.type === 'string' || input.type === 'number'`).
@@ -966,6 +990,41 @@
     font-size: 12px;
     flex: 0 0 auto;
     user-select: none;
+  }
+
+  /* "Open embedded blueprint" — swaps the canvas to the file the node
+     embeds. Same visual language as the path picker's primary action. */
+  .open-subgraph-btn {
+    flex: 1 1 auto;
+    width: 100%;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    background: white;
+    border: 1px solid #2d7cf1;
+    border-radius: 3px;
+    padding: 3px 8px;
+    color: #2d7cf1;
+    cursor: pointer;
+    transition:
+      background 0.1s ease,
+      color 0.1s ease,
+      transform 0.05s ease;
+  }
+  .open-subgraph-btn:hover:not(:disabled) {
+    background: #2d7cf1;
+    color: white;
+  }
+  .open-subgraph-btn:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+  .open-subgraph-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .open-subgraph-btn:focus-visible {
+    outline: 2px solid #2d7cf1;
+    outline-offset: 1px;
   }
 
   /* `file.pathPicker` inline editor: a wide primary button on the
