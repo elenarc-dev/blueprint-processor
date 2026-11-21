@@ -1,7 +1,19 @@
-name: Build Tauri
+
+name: Release Tauri
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -10,13 +22,11 @@ jobs:
           - windows-latest
           - macos-latest
 
-    runs-on: ${{ matrix.platform }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,8 +51,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri
+      - name: Build and publish release
         uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tauriScript: pnpm tauri
-          uploadWorkflowArtifacts: true
+          tagName: ${{ github.ref_name }}
+          releaseName: "Release ${{ github.ref_name }}"
+          releaseBody: |
+            ## Downloads
+
+            Download the installer corresponding to your operating system below.
+          releaseDraft: false
+          prerelease: false
