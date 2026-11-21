@@ -24,6 +24,7 @@
   import { get, writable, type Writable } from 'svelte/store';
   import { page as pageStore } from '$app/stores';
   import { invoke } from '@tauri-apps/api/core';
+  import { ask } from '@tauri-apps/plugin-dialog';
   import { SvelteFlowProvider } from '@xyflow/svelte';
 
   import Toolbar from '$lib/components/Toolbar.svelte';
@@ -38,7 +39,7 @@
   import { runBlueprint as runInRust } from '$lib/utils/runner-io';
   import LogsPanel from '$lib/components/LogsPanel.svelte';
   import GraphBreadcrumb from '$lib/components/GraphBreadcrumb.svelte';
-  import { blueprintToFlow } from '$lib/utils/blueprint-io';
+  import { blueprintToFlow, composeBlueprint } from '$lib/utils/blueprint-io';
   import { blueprintInputs } from '$lib/utils/blueprint-context.svelte';
   import {
     ensureSubgraph,
@@ -99,10 +100,19 @@
     meta: BlueprintMeta;
     nodes: FlowNode[];
     edges: FlowEdge[];
+    /** Fingerprint of this level as of its last load / save. */
+    baseline: string;
   }
   /** Ancestors of the graph on the canvas, outermost first. Empty at the
    *  root; every entry is a level the breadcrumb can return to. */
   let graphStack = $state<GraphFrame[]>([]);
+
+  /**
+   * Fingerprint of the live level as of its last load / save. Compared
+   * against `fingerprint()` before navigating back so leaving unsaved
+   * edits asks first. Empty means "not tracked yet" (no warning).
+   */
+  let savedBaseline = $state('');
 
   /** Breadcrumb entries: every ancestor plus the live graph. */
   const graphTrail = $derived([
@@ -246,6 +256,7 @@
       // later wouldn't silently drop it on load.
       bpMeta = stripMeta(parsed);
       currentFilePath = filePath;
+      await settleLevel();
       status = {
         message: `Loaded → ${filePath}`,
         kind: 'info',
@@ -280,6 +291,42 @@
     runError = null;
     logsOpen = false;
   }
+
+  /**
+   * Normalised serialisation of the live level for dirty checks. Mirrors
+   * what Save writes (catalog defaults, regenerated ports) minus the
+   * timestamp Save always bumps; transient Svelte Flow fields (selection,
+   * measured size) never reach `composeBlueprint`.
+   */
+  function fingerprint(): string {
+    const bp = composeBlueprint(bpMeta, get(nodes), get(edges));
+    bp.updated_at = '';
+    return JSON.stringify(bp);
+  }
+
+  /** The canvas now matches what is (or was last) on disk. */
+  function markLevelSaved() {
+    savedBaseline = fingerprint();
+  }
+
+  /**
+   * Take the baseline after embedded subgraphs resolved: the sync effect
+   * rewrites labels / ports from the files, and counting those system
+   * writes as user edits would warn on an untouched level.
+   */
+  async function settleLevel() {
+    await syncSubgraphs(get(nodes));
+    savedBaseline = fingerprint();
+  }
+
+  /** Whether the live level differs from its last load / save. */
+  function hasUnsavedChanges(): boolean {
+    return savedBaseline !== '' && savedBaseline !== fingerprint();
+  }
+
+  // A fresh page starts with an empty canvas; capture its baseline so a
+  // brand-new (never saved) level is not born dirty.
+  savedBaseline = fingerprint();
 
   /**
    * Load `path` and edit it on the same canvas, keeping the current graph
@@ -329,12 +376,14 @@
         },
         nodes: [...get(nodes)],
         edges: [...get(edges)],
+        baseline: savedBaseline,
       };
       graphStack = [...graphStack, frame];
       nodes.set(flow.nodes);
       edges.set(flow.edges);
       bpMeta = stripMeta(parsed);
       currentFilePath = path;
+      await settleLevel();
       resetRunState();
       status = { message: `Editing embedded blueprint → ${path}`, kind: 'info' };
     } catch (err) {
@@ -348,8 +397,16 @@
    * cache and any restored node that embeds it has `subgraphPath` cleared,
    * so the sync effect re-derives ports from the (possibly edited) file.
    */
-  function navigateTo(depth: number) {
+  async function navigateTo(depth: number) {
     if (depth < 0 || depth >= graphStack.length) return;
+    if (hasUnsavedChanges()) {
+      const name = bpMeta.name.trim() || currentFilePath || 'this graph';
+      const discard = await ask(
+        `Discard unsaved changes in "${name}" and go back?`,
+        { title: 'Unsaved changes', kind: 'warning' },
+      );
+      if (!discard) return;
+    }
     const leaving = [
       ...graphStack.slice(depth + 1).map((frame) => frame.path),
       currentFilePath,
@@ -370,6 +427,7 @@
     edges.set(frame.edges);
     bpMeta = frame.meta;
     currentFilePath = frame.path;
+    savedBaseline = frame.baseline;
     resetRunState();
     status = {
       message: `Back to ${frame.meta.name || frame.path || 'parent graph'}`,
@@ -378,12 +436,14 @@
   }
 
   function goBack() {
-    navigateTo(graphStack.length - 1);
+    void navigateTo(graphStack.length - 1);
   }
 
   /** Load / New replace the document, so the nesting chain no longer holds. */
   function resetGraphStack() {
     graphStack = [];
+    savedBaseline = '';
+    void settleLevel();
   }
 
   // Apply a NodeData patch (label/params) coming from the Inspector.
@@ -549,6 +609,7 @@
     onPathChange={commitPath}
     onAfterIo={onAfterIoWithInventory}
     onResetNesting={resetGraphStack}
+    onSaved={markLevelSaved}
     {logsOpen}
     logCount={runResult?.logs.length ?? 0}
     onToggleLogs={() => (logsOpen = !logsOpen)}

@@ -29,6 +29,11 @@ poder volver al padre sin perder su estado.
   los nodos contenedores restaurados, para re-derivar puertos desde el
   fichero editado.
 - `Toolbar` recibe `onResetNesting`: Load y New limpian la pila.
+- Aviso de cambios sin guardar al volver: `fingerprint()` serializa el
+  nivel con `composeBlueprint` (sin `updated_at`), `settleLevel()` toma la
+  baseline después de resolver los subgrafos y `Save` la rearma vía
+  `onSaved`. Si difiere, `ask` del plugin de diálogos pide confirmación
+  antes de restaurar el padre.
 - Corregida la migración del historial de inputs: exige que `bpMeta.id` no
   cambie, así abrir un nivel no copia los inputs del padre al hijo.
 - Docs: changelog, FRONTEND y FD-006.
@@ -40,17 +45,15 @@ poder volver al padre sin perder su estado.
 - No se ejecutó `cargo test` porque esta entrega no toca Rust.
 - No se hizo prueba visual/interactiva en navegador: el flujo de abrir,
   navegar migas y volver está verificado por tipos/compilación, no por
-  interacción real.
+  interacción real. El diálogo nativo de confirmación (`ask`) no se probó
+  fuera del runtime de Tauri.
 
 ## Problems & Blockers
 
-- Volver descarta los niveles hijos, incluidos cambios no guardados (hay que
-  guardar el hijo antes de volver). No hay aviso de cambios pendientes.
 - Cambiar de nivel mientras corre un run está bloqueado por un guard, pero
   un run lanzado desde un nivel y terminado tras navegar no se cancela.
 
 ## Next Steps
 
-- Avisar de cambios sin guardar al volver de un subgrafo.
 - Recordar el viewport (zoom/pan) de cada nivel al restaurarlo.
 - Test de interacción (Playwright) para abrir → migas → volver.

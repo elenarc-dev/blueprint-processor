@@ -315,6 +315,14 @@ cadena. `Toolbar` recibe `onResetNesting` y limpia la pila en Load / New.
 Un botón en el cuerpo de `blueprint.subgraph` / `ai.tool` emite
 `blueprint:open-subgraph`, que la página escucha en `onMount`.
 
+Volver comprueba primero si el nivel activo difiere de su baseline
+(`fingerprint()` = `composeBlueprint` serializado sin `updated_at`) y, si
+hay cambios, usa `ask` de `@tauri-apps/plugin-dialog` antes de restaurar.
+La baseline se toma tras resolver los subgrafos incrustados (`settleLevel`)
+para no contar como edición los labels/puertos que escribe el sync; `Save`
+la rearma vía la prop `onSaved` del Toolbar y `Load`/`New` la reinician
+vía `resetGraphStack`.
+
 La migración del historial de inputs (`unsaved:<id>` → path) exige además
 que `bpMeta.id` no haya cambiado, para que cambiar de nivel no copie los
 inputs del padre al hijo.

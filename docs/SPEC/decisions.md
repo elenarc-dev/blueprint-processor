@@ -212,3 +212,9 @@ actual: volver descarta los niveles hijos, incluidos sus cambios no
 guardados (el usuario debe guardarlos antes). El historial de inputs de
 cada nivel se guarda bajo su propio path o `unsaved:<id>`; cambiar de nivel
 no lo migra.
+
+Al volver, si el nivel activo tiene cambios sin guardar, se pide
+confirmación antes de descartarlo. La comparación usa el documento
+serializado (sin `updated_at` ni los puertos que el editor re-deriva del
+fichero), de modo que abrir un subgrafo y volver sin tocar nada no
+dispara el aviso. `Save` rearma la línea base.

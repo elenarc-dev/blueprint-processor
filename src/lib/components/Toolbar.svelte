@@ -47,6 +47,11 @@
      * those two actions.
      */
     onResetNesting: () => void;
+    /**
+     * Called after a successful Save / Save As… so the page can re-arm the
+     * unsaved-changes baseline of the level on the canvas.
+     */
+    onSaved: () => void;
     /** Whether the right-hand run-log drawer is open. */
     logsOpen: boolean;
     /** Entry count of the last run, shown next to the Logs button. */
@@ -62,6 +67,7 @@
     onPathChange,
     onAfterIo,
     onResetNesting,
+    onSaved,
     logsOpen,
     logCount,
     onToggleLogs,
@@ -104,6 +110,7 @@
         { json, path },
       );
       onPathChange(result.path);
+      onSaved();
       onAfterIo(`Saved ${result.bytes} B → ${result.path}`, 'info');
     } catch (err) {
       onAfterIo(`Save failed: ${err}`, 'error');
@@ -136,6 +143,7 @@
         { json, path },
       );
       onPathChange(result.path);
+      onSaved();
       onAfterIo(`Saved ${result.bytes} B → ${result.path}`, 'info');
     } catch (err) {
       onAfterIo(`Save As failed: ${err}`, 'error');
@@ -158,7 +166,6 @@
       const json = await invoke<string>('load_blueprint', { path });
       const parsed = JSON.parse(json) as Blueprint;
       const flow = blueprintToFlow(parsed);
-      onResetNesting();
       nodes.set(flow.nodes);
       edges.set(flow.edges);
       onMetaChange({
@@ -174,6 +181,7 @@
       // (works even if the user never explicitly saves — "Load" is
       // an implicit bookmark that the next Save in-place honors).
       onPathChange(path);
+      onResetNesting();
       onAfterIo(`Loaded → ${path}`, 'info');
     } catch (err) {
       onAfterIo(`Load failed: ${err}`, 'error');
@@ -192,7 +200,6 @@
     }
     nodes.set([]);
     edges.set([]);
-    onResetNesting();
     // Fresh metadata envelope — `makeMeta` produces a new UUID + stamps
     // creation time. Avoids stale `metadata.tags` / `id` leaking in via
     // an object spread.
@@ -200,6 +207,7 @@
     // Forget the previous file — the next Save should re-open the
     // picker instead of silently overwriting the old file.
     onPathChange(null);
+    onResetNesting();
     onAfterIo('New blueprint ready', 'info');
   }
 
