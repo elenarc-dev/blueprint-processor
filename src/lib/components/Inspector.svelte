@@ -506,27 +506,46 @@
 
         {#if d.kind === 'blueprint.subgraph' && String(d.params?.path ?? '').trim()}
           {@const embedded = subgraphDefs.value[String(d.params.path).trim()]}
-          <h4>Embedded inputs</h4>
+          <h4>Embedded ports</h4>
           {#if !embedded}
             <p class="muted small">Reading the embedded blueprint…</p>
           {:else if embedded.error}
             <p class="field-hint">
               Could not read the embedded blueprint: {embedded.error}
             </p>
-          {:else if embedded.inputs.filter((port) => port.type !== 'exec').length === 0}
-            <p class="muted small">
-              This subgraph declares no inputs, only the exec <code>then_in</code>.
-            </p>
           {:else}
-            <ul class="subgraph-ports">
-              {#each embedded.inputs.filter((port) => port.type !== 'exec') as port (port.id)}
-                <li>
-                  <code>{port.id}</code>
-                  <span>{port.name}</span>
-                  <em>{PORT_LABELS[port.type]}</em>
-                </li>
-              {/each}
-            </ul>
+            <p class="ports-label">Inputs</p>
+            {#if embedded.inputs.filter((port) => port.type !== 'exec').length === 0}
+              <p class="muted small">
+                No declared inputs, only the exec <code>then_in</code>.
+              </p>
+            {:else}
+              <ul class="subgraph-ports">
+                {#each embedded.inputs.filter((port) => port.type !== 'exec') as port (port.id)}
+                  <li>
+                    <code>{port.id}</code>
+                    <span>{port.name}</span>
+                    <em>{PORT_LABELS[port.type]}</em>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <p class="ports-label">Outputs</p>
+            {#if embedded.outputs.filter((port) => port.type !== 'exec').length === 0}
+              <p class="muted small">
+                No declared outputs, only the exec <code>then_out</code>.
+              </p>
+            {:else}
+              <ul class="subgraph-ports">
+                {#each embedded.outputs.filter((port) => port.type !== 'exec') as port (port.id)}
+                  <li>
+                    <code>{port.id}</code>
+                    <span>{port.name}</span>
+                    <em>{PORT_LABELS[port.type]}</em>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
             <p class="field-hint">
               Read from the embedded file; edit them inside the subgraph
               (Open embedded blueprint ↗).
@@ -825,7 +844,18 @@
     flex-direction: column;
     gap: 8px;
   }
-  /* Read-only summary of a subgraph's declared inputs (Inspector). */
+  /* Read-only summary of a subgraph's declared ports (Inspector). */
+  .ports-label {
+    margin: 0 0 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #71717a;
+  }
+  .ports-label:not(:first-child) {
+    margin-top: 8px;
+  }
   .subgraph-ports {
     list-style: none;
     padding: 0;

@@ -508,13 +508,14 @@ Panel derecho. Dos modos:
 
 En cada edición, se llama `onNodeSave(nodeId, patch)`. `+page.svelte::handleNodeSave` aplica el patch re-mapeando el nodo bajo el mismo id en el writable.
 
-Con un `blueprint.subgraph` seleccionado se añade **Embedded inputs**: la
-lista de entradas que declara el fichero incrustado (id, nombre y
-`PORT_LABELS[type]`), leída de `subgraphDefs.value[path]` — la misma caché que
-alimenta los puertos del nodo — así que se actualiza cuando el sync resuelve el
-path. Se excluye el puerto exec `then_in` y un `error` de lectura se muestra
-en su lugar. La sección es de solo lectura: las entradas se editan dentro del
-subgrafo.
+Con un `blueprint.subgraph` seleccionado se añade **Embedded ports**: dos
+listas de solo lectura con los puertos que declara el fichero incrustado —
+**Inputs** (las entradas declaradas) y **Outputs** (una por nodo `io.output`)
+—con id, nombre y `PORT_LABELS[type]`, leídas de `subgraphDefs.value[path]`,
+la misma caché que alimenta los puertos del nodo, así que se actualizan cuando
+el sync resuelve el path. Los puertos exec (`then_in` / `then_out`) y un
+`error` de lectura se tratan aparte. Las listas se editan dentro del subgrafo,
+no desde el Inspector.
 
 `Inspector` lee `nodes` (el mirror del writable). **No** añadas una subscription directa al writable aquí — lee la prop.
 
