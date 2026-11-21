@@ -141,6 +141,7 @@ async fn run(
                 system: system.clone(),
                 temperature,
                 max_tokens,
+                images: Vec::new(),
             })
         })
         .collect::<Result<_, ExecError>>()?;
@@ -579,11 +580,13 @@ fn compose_prompt(
 
 /// Where a node's `model` param actually points: which configured provider
 /// answers, under which model name, on which endpoint.
-struct Target {
-    provider_id: String,
-    provider: AiProviderKind,
-    model: String,
-    base_url: Option<String>,
+/// Resolved provider destination. Shared with `ai.vision` so both nodes
+/// honour the same `model` / legacy `provider` cascade.
+pub(crate) struct Target {
+    pub(crate) provider_id: String,
+    pub(crate) provider: AiProviderKind,
+    pub(crate) model: String,
+    pub(crate) base_url: Option<String>,
 }
 
 /// Separates `providerId::model` in the node's `model` param. `::` rather
@@ -614,7 +617,7 @@ const PROVIDER_SEPARATOR: &str = "::";
 /// "talk to this endpoint" and wins over the provider's own, but only when
 /// the node does not name the provider explicitly with `::` — an explicit
 /// provider reference is a deliberate choice of endpoint.
-fn resolve_target(
+pub(crate) fn resolve_target(
     params: &Map<String, Value>,
     providers: &[ProviderInfo],
     node: &str,

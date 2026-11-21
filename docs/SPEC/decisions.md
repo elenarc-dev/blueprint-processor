@@ -146,3 +146,35 @@ comparten el límite de anidamiento de FD-003. Una app tool sin credenciales
 propias debe llevar su `Authorization` en las cabeceras; no hay tools
 nativas, OAuth ni descubrimiento de esquema. Decisión técnica
 correspondiente: ADR-006.
+
+## FD-005 — `ai.vision` admite un número ilimitado de imágenes
+
+**Contexto.** Un prompt de texto no sirve para comparar varias imágenes ni
+para analizar un lote. Limitar el nodo a una imagen obligaría a repetir la
+llamada y perder la relación entre ellas; limitarlo a N ranuras fijas choca
+con lotes de tamaño variable.
+
+**Decisión.**
+
+- El nodo `ai.vision` tiene un `Prompt` (puerto + default en el cuerpo) y
+  ranuras `Image 1 … N` que se añaden con +/− (`# Image slots`).
+- Cada ranura acepta **una imagen base64 o un array de imágenes**, así que
+  el total por petición no está acotado por las ranuras. Un `file.read`
+  multi-fichero o un `array.create` alimentan una sola ranura sin límite.
+  Las ranuras se limitan a 64 por ergonomía del canvas; los proveedores
+  imponen además sus propios máximos por petición, que se reportan tal cual.
+- Las imágenes se aplanan en orden numérico de ranura (no de iteración) y
+  se validan como base64 antes de llamar al proveedor. El MIME se detecta
+  por magic bytes; el payload desconocido se declara `image/png`.
+- Un prompt escalar hace una llamada con todas las imágenes; un prompt
+  array hace una llamada por elemento con las mismas imágenes (broadcast),
+  con `concurrency` como límite de peticiones en vuelo. El output espeja la
+  forma del prompt, como en `ai.completion`.
+- Sin al menos una imagen el nodo falla antes de la red. El nodo no ejecuta
+  tools: es un transformador multimodal, no un agente.
+
+**Consecuencias.** Un lote de imágenes se procesa en una sola llamada, y el
+coste depende del modelo elegido. El límite práctico lo pone el proveedor:
+una petición con demasiadas imágenes o demasiado grandes devuelve su error
+verbatim. Decisión técnica: ADR-006 (el wire multimodal vive junto al
+tool-calling en `ai/providers.rs`).

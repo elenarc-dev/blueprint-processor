@@ -74,6 +74,11 @@ export interface RepeatableInputsConfig {
   max: number;
   /** Param key holding the live count. Defaults to "count". */
   countKey?: string;
+  /** Keep the kind's fixed `inputs` (e.g. `then_in`, `prompt`) in front of
+   *  the synthesised slots. Both the renderer and `composeBlueprint` merge
+   *  them, so the saved node round-trips. Default `false` preserves
+   *  `array.create`'s repeat-only shape. */
+  mergeFixedInputs?: boolean;
 }
 
 export interface NodeDef {
@@ -628,6 +633,44 @@ export const NODE_CATALOG: NodeDef[] = [
         rows: 3,
       },
     ],
+  },
+
+  // `ai.vision` — multimodal request: prompt + N image slots.
+  // Each slot accepts one base64 image OR an array of them, so a single
+  // slot can carry an unlimited number of images. `repeatableInputs`
+  // synthesises `image_1..image_N`; `mergeFixedInputs` keeps `then_in` and
+  // `prompt` visible and persisted alongside them.
+  {
+    kind: 'ai.vision',
+    category: 'AI',
+    label: 'Vision (images)',
+    description: 'Send a prompt and one or more images to a vision-capable model. Every `Image` slot accepts either one base64 image (the `Binary` output of `file.read` or `image.format`) or an array of images, so one slot can carry as many as you need. Use + to add slots when you want separate wires, up to 64; providers impose their own per-request limits. The prompt mirrors the rest of the catalog: a scalar sends one request with all the images, an array sends one request per prompt with the same images. Images are validated as base64 before the provider call, and the MIME type is sniffed from the payload. Pick the model in the Inspector; the endpoint and key come from Toolbar → AI Providers.',
+    inputs: [
+      { id: 'then_in', name: 'Then', type: T.exec },
+      { id: 'prompt', name: 'Prompt', type: T['string-or-array'] },
+    ],
+    outputs: [
+      { id: 'then_out', name: 'Then', type: T.exec },
+      { id: 'out', name: 'Out', type: T['string-or-array'] },
+    ],
+    params: [
+      { kind: 'model', key: 'model', label: 'Model', default: '' },
+      { kind: 'textarea', key: 'prompt', label: 'Prompt (default)', default: 'Describe these images.', rows: 3 },
+      { kind: 'textarea', key: 'system', label: 'System', default: '', placeholder: 'You are a careful visual analyst.', rows: 2 },
+      { kind: 'number', key: 'temperature', label: 'Temperature', default: 0.2, min: 0, max: 2, step: 0.1 },
+      { kind: 'number', key: 'max_tokens', label: 'Max tokens', default: 512, min: 1, max: 32768, step: 1 },
+      { kind: 'number', key: 'concurrency', label: 'Concurrency (array prompts)', default: 4, min: 1, max: 16, step: 1 },
+      { kind: 'number', key: 'count', label: '# Image slots', default: 1, min: 1, max: 64, step: 1 },
+    ],
+    repeatableInputs: {
+      prefix: 'image',
+      label: 'Image',
+      type: T.binary,
+      min: 1,
+      max: 64,
+      countKey: 'count',
+      mergeFixedInputs: true,
+    },
   },
 
   // ---------- Image / Binary pipeline ----------

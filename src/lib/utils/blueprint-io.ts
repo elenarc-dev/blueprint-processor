@@ -106,7 +106,12 @@ export function composeBlueprint(
     let inputs: Port[];
     if (def?.repeatableInputs) {
       const count = resolvedRepeatCount(def, params) ?? def.repeatableInputs.min;
-      inputs = synthInputs(def, count) ?? [];
+      const repeat = synthInputs(def, count) ?? [];
+      // Kinds that opt in (today `ai.vision`) keep their fixed ports
+      // (`then_in`, `prompt`) in front of the synthesised slots.
+      inputs = def.repeatableInputs.mergeFixedInputs
+        ? [...def.inputs.map((p) => ({ ...p })), ...repeat]
+        : repeat;
     } else {
       inputs = (n.data.inputs ?? []).map((p) => ({ ...p }));
     }
@@ -239,9 +244,13 @@ export function makeFlowNode(kind: string, position: { x: number; y: number }): 
     category: def.category,
     label: def.label,
     params: defaultParams(def),
-    // Leave inputs empty for repeatable kinds; BlueprintNode renders them
-    // from `def.repeatableInputs + params.count` on the fly.
-    inputs: def.repeatableInputs ? [] : def.inputs.map((p) => ({ ...p })),
+    // Repeatable kinds synthesise their slots from `params.count` on the
+    // fly; `mergeFixedInputs` kinds also keep their declared fixed ports.
+    inputs: def.repeatableInputs
+      ? def.repeatableInputs.mergeFixedInputs
+        ? def.inputs.map((p) => ({ ...p }))
+        : []
+      : def.inputs.map((p) => ({ ...p })),
     outputs: def.outputs.map((p) => ({ ...p })),
   };
 

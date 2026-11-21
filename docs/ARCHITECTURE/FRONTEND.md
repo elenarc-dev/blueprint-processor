@@ -193,6 +193,13 @@ textual para casos fuera de ella; al cambiar el path, el nodo resetea
 checklist de app tools que guarda un array de ids en `params[<key>]`.
 `defaultParams` trata los dos tipos nuevos como `''` y `[]` respectivamente.
 
+`repeatableInputs` sintetiza los puertos `prefix_1 … prefix_N` a partir de
+`params.count`. Con `mergeFixedInputs: true` (hoy `ai.vision`) el nodo
+conserva sus puertos fijos (`then_in`, `prompt`) delante de las ranuras:
+`BlueprintNode` los unifica en `visibleInputs` y `composeBlueprint` los
+persiste en ese orden. `array.create` no lo activa y mantiene su forma de
+solo ranuras.
+
 ### Helpers exportados
 
 - `getDef(kind): NodeDef | undefined` — Lo usan `BlueprintNode.svelte`, `Inspector.svelte` y `blueprint-io.ts`.

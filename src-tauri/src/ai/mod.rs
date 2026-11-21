@@ -166,6 +166,11 @@ pub struct AiRequest {
     pub system: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
+    /// Base64 images attached to the user message, in order. Empty for a
+    /// text-only request (the `ai.completion` path). Vision requests go
+    /// through [`providers::complete_vision`], which speaks the image wire
+    /// directly because rig's text completion has no image support.
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -334,7 +339,11 @@ impl AiGateway for RigGateway {
     fn complete<'a>(&'a self, req: &'a AiRequest) -> BoxFuture<'a, Result<String, AiError>> {
         Box::pin(async move {
             let (key, resolved) = self.resolve(req)?;
-            providers::complete(&key, &resolved).await
+            if resolved.images.is_empty() {
+                providers::complete(&key, &resolved).await
+            } else {
+                providers::complete_vision(&key, &resolved).await
+            }
         })
     }
 

@@ -11,6 +11,7 @@ use crate::executor::{AsyncNodeExec, NodeExec};
 
 pub mod ai_completion;
 pub mod ai_tool;
+pub mod ai_vision;
 pub mod array_create;
 pub mod array_filter;
 pub mod array_get_field;
@@ -128,6 +129,7 @@ pub fn setup_async_registry() -> HashMap<String, AsyncNodeExec> {
 
     // AI
     r.insert("ai.completion".into(), ai_completion::exec as AsyncNodeExec);
+    r.insert("ai.vision".into(), ai_vision::exec as AsyncNodeExec);
     r.insert("blueprint.subgraph".into(), blueprint_subgraph::exec as AsyncNodeExec);
 
     // HTTP. Network I/O belongs on the async path even though it shares

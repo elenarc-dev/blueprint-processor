@@ -15,7 +15,7 @@ Todo el código backend vive en `src-tauri/src/`. Las dependencias Cargo están 
 | `executor/nodes/mod.rs` | 107 | El registro (`setup_registry`); declara todos los `pub mod` por nodo y el `test_helpers` compartido bajo `#[cfg(test)]`. |
 | `executor/nodes/*.rs` | 20×40–112 | UN FICHERO POR KIND. Cada uno exporta `pub fn exec(...)` y contiene su propio `#[cfg(test)] mod tests`. |
 | `ai/mod.rs` | ~240 | Capa de IA: `AiProviderKind`, `AiRequest`, `AiError`, `AiGateway` (trait dyn-safe), `AiEnv`, `ProviderInfo`, `RigGateway`, `UnconfiguredGateway`. |
-| `ai/providers.rs` | ~220 | ÚNICO fichero que conoce `rig-core`. Traduce a OpenAI Chat Completions (con `base_url`) y Anthropic Messages; reintentos acotados. |
+| `ai/providers.rs` | ~220 | ÚNICO fichero que conoce `rig-core`. Traduce a OpenAI Chat Completions (con `base_url`) y Anthropic Messages; reintentos acotados. El texto va por rig; visión y tool-calling usan JSON directo (`complete_vision`, `complete_turn`) para controlar imágenes y `tool_calls`. |
 | `ai/secrets.rs` | ~700 | `SecretStore`: catálogo global de proveedores (`id`, `kind`, `label`, `base_url`, `models`) y sus claves en `<app_data_dir>/secrets.json`, con migración del formato legacy, escritura atómica y `0600` en Unix. |
 | `ai/mock.rs` | ~55 | `MockGateway` bajo `#[cfg(test)]`: tests offline y deterministas, incluido `with_providers()` / `with_tools()` para poblar catálogos y `with_turns()` para guionizar un bucle de tools. |
 | `app_tools.rs` | ~350 | Catálogo global de herramientas de IA en `<app_data_dir>/tools.json` (nombre, descripción, JSON Schema, método, URL, cabeceras). CRUD bajo mutex, saneado de nombres, escritura atómica y `0600` en Unix. |
@@ -391,6 +391,7 @@ Cada entrada abajo es el mapeo kind → fichero más el contrato del ejecutor (u
 | `http.request` | `http_request.rs` | Async (registro async). `perform()` es compartido con las app tools. Emite `then_out: null`, `status: number`, `body: string` y `json: Value` (parseado o `null`). Un status no-2xx es dato; solo fallan los errores de transporte. |
 | `blueprint.subgraph` | `blueprint_subgraph.rs` | Async. Lee `params.path`, pasa los puertos no-`exec` no nulos como `external_inputs` del blueprint embebido y devuelve sus outputs + `then_out: null`. Usa `runner::run_blueprint_path`. |
 | `ai.tool` | `ai_tool.rs` | Síncrono, sin inputs. Emite `tool: { name, description, parameters, blueprint_path }`; `name` vacío se deriva del nombre del fichero. Consumido por el puerto `tools` de `ai.completion`. |
+| `ai.vision` | `ai_vision.rs` | Async. Prompt (escalar o array) + ranuras `image_N` con forma fija + dinámica. Cada ranura acepta un string base64 o un array (se aplanan en orden numérico de ranura). Valida base64, construye `AiRequest.images` y usa `resolve_target` compartido con `ai.completion`; el gateway elige `complete_vision` cuando hay imágenes. |
 
 **Anidamiento.** `runner::run_graph_with_depth` arrastra una profundidad
 que viaja en `AiEnv.depth`; `run_blueprint_path` la comprueba contra

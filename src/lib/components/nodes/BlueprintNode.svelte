@@ -87,6 +87,29 @@
     repeatCfg ? (resolvedRepeatCount(def, d.params ?? {}) ?? repeatCfg.min) : 0,
   );
 
+  /** Fixed ports rendered before the slots for kinds that opt in (today
+   *  `ai.vision` keeps `then_in` + `prompt`). */
+  const repeatFixedPorts = $derived(
+    repeatCfg?.mergeFixedInputs ? (def?.inputs ?? []) : [],
+  );
+
+  /** The `prefix_1 … prefix_N` slots synthesised from the live count. */
+  const repeatPorts = $derived(
+    repeatCfg
+      ? Array.from({ length: repeatCount }, (_, i) => ({
+          id: `${repeatCfg.prefix}_${i + 1}`,
+          name: `${repeatCfg.label} ${i + 1}`,
+          type: repeatCfg.type,
+        }))
+      : [],
+  );
+
+  /** What the body renders. Fixed-shape kinds read their loaded ports;
+   *  repeatable kinds merge their optional fixed ports with the slots. */
+  const visibleInputs = $derived(
+    repeatCfg ? [...repeatFixedPorts, ...repeatPorts] : (d.inputs ?? []),
+  );
+
   /** Read the per-port inline-default value from `params[<port_id>]`.
    *  Returns the empty string when the param entry is missing OR
    *  when its rendered type doesn't match the port type (so a
@@ -284,42 +307,7 @@
   </div>
 
   <div class="body">
-    {#if repeatCfg}
-      {#each Array(repeatCount) as _, i (i)}
-        <div class="row">
-          <Handle
-            type="target"
-            position={Position.Left}
-            id={`${repeatCfg.prefix}_${i + 1}`}
-            class="port port-{repeatCfg.type}"
-            style="--port-color: {PORT_COLORS[repeatCfg.type]}"
-          />
-          <span class="port-label" title={PORT_LABELS[repeatCfg.type]}>
-            {repeatCfg.label} {i + 1}
-          </span>
-        </div>
-      {/each}
-      <div class="row controls">
-        <span class="badge">
-          {repeatCfg.label.toLowerCase()}s: <strong>{repeatCount}</strong>
-        </span>
-        <button
-          type="button"
-          class="ctrl-btn"
-          onclick={() => bumpRepeatCount(-1)}
-          disabled={repeatCount <= repeatCfg.min}
-          title="Remove one field"
-          aria-label="Remove one field">−</button>
-        <button
-          type="button"
-          class="ctrl-btn"
-          onclick={() => bumpRepeatCount(+1)}
-          disabled={repeatCount >= repeatCfg.max}
-          title="Add one field (max {repeatCfg.max})"
-          aria-label="Add one field">+</button>
-      </div>
-    {:else}
-      {#each (d.inputs ?? []) as input (input.id)}
+    {#each visibleInputs as input (input.id)}
         <!-- Type-exclusion gate lives at the line below
              (`input.type === 'string' || input.type === 'number'`).
              Rationale (catalog-driven): boolean/array/binary/json
@@ -369,7 +357,28 @@
             />
           {/if}
         </div>
-      {/each}
+    {/each}
+
+    {#if repeatCfg}
+      <div class="row controls">
+        <span class="badge">
+          {repeatCfg.label.toLowerCase()}s: <strong>{repeatCount}</strong>
+        </span>
+        <button
+          type="button"
+          class="ctrl-btn"
+          onclick={() => bumpRepeatCount(-1)}
+          disabled={repeatCount <= repeatCfg.min}
+          title="Remove one field"
+          aria-label="Remove one field">−</button>
+        <button
+          type="button"
+          class="ctrl-btn"
+          onclick={() => bumpRepeatCount(+1)}
+          disabled={repeatCount >= repeatCfg.max}
+          title="Add one field (max {repeatCfg.max})"
+          aria-label="Add one field">+</button>
+      </div>
     {/if}
 
     {#if d.kind === 'literal.number'}

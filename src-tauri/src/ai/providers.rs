@@ -59,6 +59,201 @@ pub async fn complete(api_key: &str, req: &AiRequest) -> Result<String, AiError>
     }
 }
 
+/// Run one **vision** completion: prompt plus base64 images.
+///
+/// Kept separate from [`complete`] because rig's text completion has no
+/// image support, and from [`complete_turn`] because a vision node does not
+/// run a tool loop. Both wires get the same retry policy as text.
+pub async fn complete_vision(api_key: &str, req: &AiRequest) -> Result<String, AiError> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let outcome = match req.provider {
+            AiProviderKind::OpenAi => openai_vision(api_key, req).await,
+            AiProviderKind::Anthropic => anthropic_vision(api_key, req).await,
+        };
+        match outcome {
+            Ok(text) => return Ok(text),
+            Err(message) => {
+                if attempt >= MAX_ATTEMPTS || !is_retryable(&message) {
+                    return Err(AiError::Provider {
+                        provider: req.provider.as_str().to_string(),
+                        message,
+                    });
+                }
+                let delay = 400u64 * 2u64.pow(attempt - 1);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
+
+/// Sniff the image MIME type from the leading base64 characters. Our
+/// `binary` convention carries raw file bytes in base64, so the file magic
+/// is preserved; an unknown payload is declared `image/png`, which is what
+/// `image.format` emits by default.
+fn image_media_type(data: &str) -> &'static str {
+    let head: String = data.chars().take(16).collect();
+    if head.starts_with("iVBORw0KGgo") {
+        "image/png"
+    } else if head.starts_with("/9j/") {
+        "image/jpeg"
+    } else if head.starts_with("R0lGOD") {
+        "image/gif"
+    } else if head.starts_with("UklGR") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+fn openai_vision_payload(req: &AiRequest) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": &req.prompt })];
+    for image in &req.images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:{};base64,{image}", image_media_type(image))
+            }
+        }));
+    }
+
+    let mut messages: Vec<Value> = Vec::new();
+    if let Some(system) = req
+        .system
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        messages.push(json!({ "role": "system", "content": system }));
+    }
+    messages.push(json!({ "role": "user", "content": content }));
+
+    let mut payload = json!({ "model": &req.model, "messages": messages });
+    if let Some(temperature) = req.temperature {
+        payload["temperature"] = json!(temperature);
+    }
+    if let Some(max_tokens) = req.max_tokens {
+        payload["max_tokens"] = json!(max_tokens);
+    }
+    payload
+}
+
+fn anthropic_vision_payload(req: &AiRequest) -> Value {
+    let mut content: Vec<Value> = req
+        .images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_media_type(image),
+                    "data": image,
+                }
+            })
+        })
+        .collect();
+    content.push(json!({ "type": "text", "text": &req.prompt }));
+
+    let mut payload = json!({
+        "model": &req.model,
+        "max_tokens": req.max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS),
+        "messages": [{ "role": "user", "content": content }],
+    });
+    if let Some(system) = req
+        .system
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        payload["system"] = json!(system);
+    }
+    if let Some(temperature) = req.temperature {
+        payload["temperature"] = json!(temperature);
+    }
+    payload
+}
+
+async fn openai_vision(api_key: &str, req: &AiRequest) -> Result<String, String> {
+    let base = req.base_url.as_deref().unwrap_or("https://api.openai.com/v1");
+    let body = post_json(
+        &openai_endpoint(base),
+        vec![("Authorization", format!("Bearer {api_key}"))],
+        &openai_vision_payload(req),
+    )
+    .await?;
+    let text = body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if text.trim().is_empty() {
+        return Err("provider returned no text content".to_string());
+    }
+    Ok(text)
+}
+
+async fn anthropic_vision(api_key: &str, req: &AiRequest) -> Result<String, String> {
+    let base = req
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.anthropic.com");
+    let body = post_json(
+        &anthropic_endpoint(base),
+        vec![
+            ("x-api-key", api_key.to_string()),
+            ("anthropic-version", "2023-06-01".to_string()),
+        ],
+        &anthropic_vision_payload(req),
+    )
+    .await?;
+
+    let blocks = body["content"]
+        .as_array()
+        .ok_or_else(|| "provider returned no content".to_string())?;
+    let mut text = String::new();
+    for block in blocks {
+        if block["type"].as_str() == Some("text") {
+            text.push_str(block["text"].as_str().unwrap_or(""));
+        }
+    }
+    if text.trim().is_empty() {
+        return Err("provider returned no text content".to_string());
+    }
+    Ok(text)
+}
+
+/// Shared POST helper for the raw-JSON paths. Retries are handled by the
+/// callers, so this only reports transport/HTTP/JSON failures.
+async fn post_json(
+    endpoint: &str,
+    headers: Vec<(&str, String)>,
+    payload: &Value,
+) -> Result<Value, String> {
+    let mut request = reqwest::Client::new()
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .timeout(Duration::from_secs(120));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            truncated(&text, 500)
+        ));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("invalid provider JSON: {e}"))
+}
+
 /// Run one **tool-aware** turn against `req`'s provider.
 ///
 /// Text completion goes through rig; tool calling does not, because the
@@ -538,6 +733,7 @@ mod tests {
             system: None,
             temperature: None,
             max_tokens: None,
+            images: Vec::new(),
         };
         let built = build_request(&req, &req.prompt);
         assert_eq!(built.max_tokens, Some(ANTHROPIC_DEFAULT_MAX_TOKENS));
@@ -557,6 +753,57 @@ mod tests {
             anthropic_endpoint("https://api.anthropic.com"),
             "https://api.anthropic.com/v1/messages"
         );
+    }
+
+    #[test]
+    fn media_types_are_sniffed_from_the_magic_bytes() {
+        assert_eq!(image_media_type("iVBORw0KGgoAAAA"), "image/png");
+        assert_eq!(image_media_type("/9j/4AAQSkZJRg"), "image/jpeg");
+        assert_eq!(image_media_type("R0lGODlhAQAB"), "image/gif");
+        assert_eq!(image_media_type("UklGRiQAAABXRUJQ"), "image/webp");
+        // Unknown payloads fall back to the encoder's default.
+        assert_eq!(image_media_type("AAAA"), "image/png");
+    }
+
+    fn vision_request() -> AiRequest {
+        AiRequest {
+            provider_id: "openai".into(),
+            provider: AiProviderKind::OpenAi,
+            model: "gpt-4o".into(),
+            base_url: None,
+            prompt: "what is this?".into(),
+            system: Some("Be brief.".into()),
+            temperature: Some(0.1),
+            max_tokens: Some(64),
+            images: vec!["iVBORw0KGgoAAAA".into(), "/9j/4AAQSkZJRg".into()],
+        }
+    }
+
+    #[test]
+    fn openai_vision_sends_data_urls_and_a_system_message() {
+        let payload = openai_vision_payload(&vision_request());
+        assert_eq!(payload["messages"][0]["role"], "system");
+        let content = payload["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgoAAAA"
+        );
+        assert_eq!(
+            content[2]["image_url"]["url"],
+            "data:image/jpeg;base64,/9j/4AAQSkZJRg"
+        );
+    }
+
+    #[test]
+    fn anthropic_vision_uses_base64_blocks() {
+        let payload = anthropic_vision_payload(&vision_request());
+        assert_eq!(payload["system"], "Be brief.");
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[2]["type"], "text");
+        assert_eq!(content[2]["text"], "what is this?");
     }
 
     #[test]
@@ -628,6 +875,7 @@ mod tests {
             system: Some("Be terse.".into()),
             temperature: Some(0.1),
             max_tokens: Some(64),
+            images: Vec::new(),
         };
         let built = build_request(&req, &req.prompt);
         assert_eq!(built.system_instructions(), Some("Be terse."));
