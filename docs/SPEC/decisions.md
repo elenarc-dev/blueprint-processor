@@ -218,3 +218,29 @@ confirmación antes de descartarlo. La comparación usa el documento
 serializado (sin `updated_at` ni los puertos que el editor re-deriva del
 fichero), de modo que abrir un subgrafo y volver sin tocar nada no
 dispara el aviso. `Save` rearma la línea base.
+
+## FD-007 — Guardar la selección como blueprint y dejarla como nodo Subgraph
+
+**Contexto.** Un grafo grande se vuelve difícil de leer y de reutilizar. El
+usuario necesita extraer un conjunto de nodos a un fichero propio sin
+reconstruirlo a mano ni volver a cablearlo en el grafo original.
+
+**Decisión.** El Toolbar ofrece **Group as…** cuando hay al menos un nodo
+seleccionado. La acción:
+
+- compone un blueprint nuevo con los nodos seleccionados y solo los wires
+  cuyo origen y destino están dentro de la selección (las posiciones se
+  conservan);
+- pide ruta con el diálogo nativo y escribe el fichero con `save_blueprint`;
+- sustituye en el grafo actual los nodos seleccionados por un único nodo
+  `blueprint.subgraph` cuyo `params.path` apunta al fichero recién creado,
+  colocado en el centroide de la selección. El sync de la página deriva sus
+  puertos y su nombre del fichero.
+
+**Consecuencias.** Los wires que cruzaban el borde de la selección se
+eliminan, porque el grupo no declara puertos hasta que existe el fichero; el
+número descartado se reporta en la barra de estado. Los nodos
+`blueprint.input` no se trasladan como entradas del grupo: `metadata.inputs`
+pertenece al blueprint padre, así que dentro del grupo no emiten puertos.
+No hay deshacer: el fichero nuevo queda en disco aunque el usuario cierre el
+editor después.

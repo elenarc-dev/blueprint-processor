@@ -19,6 +19,7 @@
   import {
     blueprintToFlow,
     composeBlueprint,
+    makeFlowNode,
     type FlowNode,
     type FlowEdge,
   } from '$lib/utils/blueprint-io';
@@ -75,6 +76,14 @@
 
   let saving = $state(false);
   let loading = $state(false);
+  /** Nodes selected on the canvas — enables "Group as…". */
+  let selectionCount = $state(0);
+  $effect(() =>
+    nodes.subscribe(
+      (list) =>
+        (selectionCount = list.filter((node) => node.selected).length),
+    ),
+  );
   /** Global AI providers (endpoints, models, keys) — see AiProvidersDialog. */
   let providersOpen = $state(false);
   /** Global app-level AI tools — see AiToolsDialog. */
@@ -150,6 +159,101 @@
     } finally {
       saving = false;
     }
+  }
+
+  /**
+   * Save the selected nodes as their own blueprint and replace them in this
+   * graph with one `blueprint.subgraph` node pointing at the new file. Only
+   * wires with both ends inside the selection travel with it; wires crossing
+   * the boundary are dropped because the group has no port contract until
+   * the file exists (the node derives its ports on sync).
+   */
+  async function handleSaveSelection() {
+    const selected = get(nodes).filter((node) => node.selected);
+    if (selected.length === 0) {
+      onAfterIo('Select one or more nodes to group', 'error');
+      return;
+    }
+    const selectedIds = new Set(selected.map((node) => node.id));
+    const innerEdges = get(edges).filter(
+      (edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target),
+    );
+    const outerWires = get(edges).filter(
+      (edge) => selectedIds.has(edge.source) !== selectedIds.has(edge.target),
+    ).length;
+
+    const name = `${meta.name.trim() || 'Untitled'} · group`;
+    const subMeta = makeMeta(name);
+    subMeta.description = `Group of ${selected.length} nodes extracted from ${
+      meta.name.trim() || 'an untitled blueprint'
+    }.`;
+    const grouped = composeBlueprint(subMeta, selected, innerEdges);
+
+    let path: string | string[] | null = null;
+    try {
+      path = await saveDialog({
+        title: 'Save selected nodes as a blueprint',
+        defaultPath: `${slugify(name)}.blueprint.json`,
+        filters: [
+          { name: 'Blueprint JSON', extensions: ['blueprint.json', 'json'] },
+        ],
+      });
+    } catch (err) {
+      onAfterIo(`Group failed: ${err}`, 'error');
+      return;
+    }
+    if (!path || Array.isArray(path)) return;
+
+    try {
+      saving = true;
+      const result = await invoke<{ path: string; bytes: number }>(
+        'save_blueprint',
+        { json: JSON.stringify(grouped, null, 2), path },
+      );
+
+      const center = selected.reduce(
+        (acc, node) => ({
+          x: acc.x + node.position.x / selected.length,
+          y: acc.y + node.position.y / selected.length,
+        }),
+        { x: 0, y: 0 },
+      );
+      const subgraph = makeFlowNode('blueprint.subgraph', center);
+      subgraph.data.params = { ...subgraph.data.params, path: result.path };
+      subgraph.data.label = name;
+
+      nodes.set([
+        ...get(nodes).filter((node) => !selectedIds.has(node.id)),
+        subgraph,
+      ]);
+      edges.set(
+        get(edges).filter(
+          (edge) =>
+            !selectedIds.has(edge.source) && !selectedIds.has(edge.target),
+        ),
+      );
+
+      onAfterIo(
+        `Grouped ${selected.length} nodes → ${result.path}` +
+          (outerWires > 0 ? ` · ${outerWires} outer wire(s) dropped` : ''),
+        'info',
+      );
+    } catch (err) {
+      onAfterIo(`Group failed: ${err}`, 'error');
+    } finally {
+      saving = false;
+    }
+  }
+
+  /** Filename-safe slug for the default path of a grouped blueprint. */
+  function slugify(value: string): string {
+    const slug = value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return slug || 'subgraph';
   }
 
   async function handleLoad() {
@@ -242,6 +346,16 @@
     title="Save to a new file…"
   >
     Save As…
+  </button>
+  <button
+    class="btn"
+    onclick={handleSaveSelection}
+    disabled={saving || selectionCount === 0}
+    title={selectionCount === 0
+      ? 'Select nodes on the canvas first'
+      : `Save ${selectionCount} selected node${selectionCount === 1 ? '' : 's'} as a blueprint and replace them with a Subgraph node`}
+  >
+    Group as…
   </button>
 
   <div class="separator"></div>

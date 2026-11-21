@@ -323,6 +323,14 @@ para no contar como edición los labels/puertos que escribe el sync; `Save`
 la rearma vía la prop `onSaved` del Toolbar y `Load`/`New` la reinician
 vía `resetGraphStack`.
 
+**Group as…** (Toolbar) usa la selección de Svelte Flow (`node.selected`):
+compone un blueprint con esos nodos y los wires internos vía
+`composeBlueprint` + `makeMeta`, lo escribe con `save_blueprint` y luego
+sustituye los nodos por un `blueprint.subgraph` (`makeFlowNode`) en el
+centroide, con `params.path` apuntando al fichero. Los wires que cruzaban
+el borde se descartan; el sync de la página deriva los puertos del fichero
+nuevo.
+
 La migración del historial de inputs (`unsaved:<id>` → path) exige además
 que `bpMeta.id` no haya cambiado, para que cambiar de nivel no copie los
 inputs del padre al hijo.
