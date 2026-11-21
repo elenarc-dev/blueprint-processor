@@ -6,6 +6,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de la release (ej. v1.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
